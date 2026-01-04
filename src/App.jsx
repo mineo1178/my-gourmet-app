@@ -28,7 +28,7 @@ import {
 } from 'firebase/auth';
 
 // ★ バージョン定義
-const VERSION = "v3.56-MOBILE-FINAL";
+const VERSION = "v3.57-STABLE-FINAL";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -155,6 +155,7 @@ const GourmetApp = () => {
 
   const isMobile = useMemo(() => checkIsMobile(), []);
   
+  // 現在の同期パス
   const firestoreCollectionPath = shareKey 
     ? `artifacts/${appId}/shared/${shareKey.trim()}/stores` 
     : user && !user.isAnonymous 
@@ -228,7 +229,7 @@ const GourmetApp = () => {
 
   const loadLocalData = () => {
     const saved = localStorage.getItem('gourmetStores');
-    if (saved) setData(JSON.parse(saved));
+    if (saved) setData(JSON.parse(saved) || []);
   };
 
   const saveData = async (storesToSave) => {
@@ -342,7 +343,7 @@ const GourmetApp = () => {
       <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans text-center px-6">
         <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4 mx-auto" />
         <p className="font-black text-slate-800 text-3xl uppercase tracking-tighter mb-2">{VERSION}</p>
-        <p className="font-black text-slate-400 uppercase tracking-widest text-[10px]">Verifying System...</p>
+        <p className="font-black text-slate-400 uppercase tracking-widest text-[10px]">Initializing...</p>
       </div>
     );
   }
@@ -378,11 +379,11 @@ const GourmetApp = () => {
            </div>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={() => setSyncTrigger(prev => prev + 1)} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600"><RotateCcw size={12}/> Refresh</button>
-          <button onClick={async () => { if(window.confirm("初期化します。")) { await signOut(auth); localStorage.clear(); window.location.reload(); } }} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset</button>
+          <button onClick={() => setSyncTrigger(prev => prev + 1)} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600 transition-colors"><RotateCcw size={12}/> Refresh</button>
+          <button onClick={async () => { if(window.confirm("初期化します。")) { await signOut(auth); localStorage.clear(); window.location.reload(); } }} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset App</button>
         </div>
         <div className="space-y-1">
-          <div className="flex justify-between items-center font-black text-slate-500 uppercase tracking-widest text-[8px]"><span>Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 hover:underline">COPY</button></div>
+          <div className="flex justify-between items-center font-black text-slate-500 uppercase tracking-widest text-[8px]"><span>Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline">COPY</button></div>
           <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-72 overflow-y-auto text-[8px] scrollbar-hide">
             {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
           </div>
@@ -395,39 +396,38 @@ const GourmetApp = () => {
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
       <DiagnosticPanel />
 
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
-        <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
-          <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
-          <div className="hidden sm:block leading-tight">
-            <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase italic">Gourmet Master</h1>
-          </div>
-        </div>
-        <div className="flex-1 relative group">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
-          <input type="text" placeholder="検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-3 sm:px-4 gap-2 sm:gap-4">
+        <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
+          <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={20} /></div>
+          <h1 className="font-black text-lg tracking-tighter text-slate-800 uppercase italic hidden lg:block leading-none">Gourmet Master</h1>
         </div>
         
-        {/* Cloud/Local バッジ: はみ出さないように最適化 */}
-        <div className={`flex items-center gap-1 px-2 py-1.5 rounded-xl border shadow-inner shrink-0 ${firestoreCollectionPath ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-200'}`}>
-          <Cloud size={14} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-400'} />
-          <span className={`text-[10px] font-black uppercase tracking-tighter ${firestoreCollectionPath ? 'text-orange-700' : 'text-slate-600'}`}>
+        <div className="flex-1 relative group">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={16} />
+          <input type="text" placeholder="検索..." className="w-full pl-9 pr-3 py-2 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+        </div>
+        
+        {/* Cloud/Local バッジ: 幅を固定してはみ出しを防止 */}
+        <div className={`flex items-center gap-1 px-2 py-1.5 rounded-xl border shadow-inner shrink-0 min-w-[65px] justify-center ${firestoreCollectionPath ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-200'}`}>
+          <Cloud size={12} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-400'} />
+          <span className={`text-[9px] font-black uppercase tracking-tighter ${firestoreCollectionPath ? 'text-orange-700' : 'text-slate-600'}`}>
             {firestoreCollectionPath ? 'Cloud' : 'Local'}
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-           <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
-             <Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+           <label className="p-2.5 bg-slate-900 text-white rounded-xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
+             <Upload size={18} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
            </label>
            {(!user || user.isAnonymous) && (
-             <button onClick={startLogin} className="p-2.5 bg-white border border-slate-200 text-slate-400 rounded-2xl hover:bg-slate-50 transition-all hidden sm:flex" title="Googleログイン"><LinkIcon size={20} /></button>
+             <button onClick={startLogin} className="p-2 bg-white border border-slate-200 text-slate-400 rounded-xl hover:bg-slate-50 transition-all" title="Googleログイン"><LinkIcon size={18} /></button>
            )}
         </div>
       </header>
 
       <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
         {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-6 sm:px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
             {tab.icon} {tab.label}
           </button>
         ))}
@@ -435,19 +435,19 @@ const GourmetApp = () => {
 
       <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
         <div className="mb-12 text-center animate-in fade-in duration-1000">
-           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] mb-2 leading-none">Authentication System</p>
-           <h2 className="text-6xl font-black text-slate-900 italic tracking-tighter leading-none mb-2">{VERSION}</h2>
+           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] mb-2 leading-none">Culinary Database System</p>
+           <h2 className="text-5xl sm:text-7xl font-black text-slate-900 italic tracking-tighter leading-none mb-4">{VERSION}</h2>
            <div className="w-16 h-1.5 bg-orange-500 mx-auto rounded-full" />
         </div>
 
         {data.length === 0 ? (
           <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100 animate-in zoom-in duration-500">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={80} />
-              <h2 className="text-4xl font-black mb-4 text-slate-800 tracking-tight italic uppercase leading-none">Empty List</h2>
-              <p className="text-slate-400 mb-10 font-bold max-w-sm mx-auto text-sm leading-relaxed">共有キーを設定して同期するか、エクセルから取り込んでください。</p>
+              <h2 className="text-4xl font-black mb-4 text-slate-800 tracking-tight italic uppercase leading-none">No Data</h2>
+              <p className="text-slate-400 mb-10 font-bold max-w-sm mx-auto text-sm leading-relaxed">共有キーを入力してクラウド同期を開始するか、Excelファイルを読み込んでください。</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
-                <button onClick={() => saveData([{NO:1,店舗名:"サンプル名店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest uppercase">Sample</button>
-                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase">Import<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
+                <button onClick={() => saveData([{NO:1,店舗名:"サンプル名店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest uppercase tracking-tighter">Sample</button>
+                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase tracking-tighter">Import<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
               </div>
           </div>
         ) : (
@@ -494,7 +494,7 @@ const GourmetApp = () => {
                               <p className="line-clamp-2 leading-relaxed italic">{store.住所 || "住所情報なし"}</p>
                               <div className="flex gap-3 pt-4 border-t border-slate-50">
                                 {store.URL && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex-1 py-3 bg-orange-50 text-orange-600 rounded-xl hover:bg-orange-600 hover:text-white transition-all text-center text-[10px] font-black uppercase tracking-widest">Visit Website</a>)}
-                                <button onClick={() => deleteData(store.id)} className="p-3 bg-slate-50 text-slate-300 hover:text-red-600 hover:bg-white rounded-xl transition-all shadow-inner"><Trash2 size={18}/></button>
+                                <button onClick={() => deleteData(store.id)} className="p-3 bg-slate-50 text-slate-400 hover:text-red-600 hover:bg-white rounded-xl transition-all shadow-inner"><Trash2 size={18}/></button>
                               </div>
                             </div>
                           </div>
@@ -505,13 +505,9 @@ const GourmetApp = () => {
                 </div>
               </div>
             )}
-          </main>
-        </div>
+          </div>
+        )}
       </main>
-
-      {(!user || user.isAnonymous) && (
-        <button onClick={startLogin} className="fixed bottom-12 right-12 sm:hidden w-20 h-20 bg-gradient-to-br from-orange-500 to-rose-500 text-white rounded-full shadow-2xl flex items-center justify-center z-[90] active:scale-125 transition-all shadow-orange-500/50"><Plus size={40}/></button>
-      )}
 
       <footer className="w-full py-8 text-center text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] bg-white border-t sm:hidden mb-4">
         VER {VERSION} | SHARED CLOUD SYSTEM
