@@ -27,7 +27,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.51-SYNC-SPEED-FIX";
+const VERSION = "v3.52-SYNC-RELIABLE";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -148,7 +148,7 @@ const GourmetApp = () => {
   const [syncTrigger, setSyncTrigger] = useState(0); 
   const [isLocating, setIsLocating] = useState(false);
 
-  // --- 診断・共有設定 ---
+  // --- 共有設定 ---
   const [shareKey, setShareKey] = useState(() => localStorage.getItem('gourmet_share_key') || '');
   const [logs, setLogs] = useState([]);
   const [isDebugOpen, setIsDebugOpen] = useState(false);
@@ -162,6 +162,7 @@ const GourmetApp = () => {
 
   const isMobile = useMemo(() => checkIsMobile(), []);
   
+  // 現在の Firestore データパスを決定
   const firestoreCollectionPath = shareKey 
     ? `artifacts/${appId}/shared/${shareKey}/stores` 
     : user && !user.isAnonymous 
@@ -237,9 +238,12 @@ const GourmetApp = () => {
     addLog("SUBSCRIBE", firestoreCollectionPath);
     const q = collection(db, firestoreCollectionPath);
     const unsub = onSnapshot(q, (snap) => {
-      setData(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const stores = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // 空のクラウドに上書きされるのを防ぐため、もしローカルにしかデータがない状態でクラウドに繋いだ場合は警告が必要だが、
+      // 基本は snapshot を優先する。
+      setData(stores);
       setIsSyncing(false);
-      addLog("SYNC_RECEIVED");
+      addLog("SYNC_RECEIVED", `${stores.length}件`);
     }, (err) => { 
       console.error(err); 
       setIsSyncing(false); 
@@ -311,46 +315,30 @@ const GourmetApp = () => {
     }
   };
 
-  // --- 修正: ファイルアップロード処理の改善 ---
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file) return;
-    
-    if (!window.XLSX) {
-      alert("Excelライブラリが読み込まれていません。ページを再読み込みしてください。");
-      return;
-    }
-
+    if (!file || !window.XLSX) return;
     addLog("FILE_UPLOAD_START", file.name);
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const workbook = window.XLSX.read(e.target.result, { type: 'array' });
         const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-        
-        const normalized = jsonData.map((item, index) => {
-          const name = item.店舗名 || item['店舗名'] || '名称不明';
-          const addr = item.住所 || item['住所'] || '';
-          const pref = item.都道府県 || item['都道府県'] || 'その他';
-          
-          return {
-            NO: item.NO || item['NO'] || (data.length + index + 1),
-            店舗名: name,
-            カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店',
-            都道府県: pref,
-            住所: addr,
-            URL: item.URL || item['URL'] || '',
-            imageURL: item.imageURL || item['imageURL'] || '',
-            isFavorite: false
-          };
-        });
-        
-        // 高速バッチ保存を使用
+        const normalized = jsonData.map((item, index) => ({
+          NO: item.NO || item['NO'] || (data.length + index + 1),
+          店舗名: item.店舗名 || item['店舗名'] || '名称不明',
+          カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店',
+          都道府県: item.都道府県 || item['都道府県'] || 'その他',
+          住所: item.住所 || item['住所'] || '',
+          URL: item.URL || item['URL'] || '',
+          imageURL: item.imageURL || item['imageURL'] || '',
+          isFavorite: false
+        }));
         saveData(normalized);
         setActiveTab('list');
         addLog("FILE_IMPORT_SUCCESS", `${normalized.length} items`);
       } catch (err) { 
-        alert("解析に失敗しました。形式を確認してください。");
+        alert("解析に失敗しました。");
         addLog("FILE_IMPORT_ERROR", err.message);
       }
     };
@@ -409,19 +397,19 @@ const GourmetApp = () => {
                 type="text" 
                 value={shareKey} 
                 onChange={(e) => setShareKey(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
-                placeholder="例: family-gourmet"
+                placeholder="例: my-sync-key"
                 className="w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-white outline-none focus:border-orange-500/50 text-[10px]"
               />
-              <p className="text-[7px] text-slate-500 leading-tight">※同じキーを入れた端末間で同期されます。変更後は自動で再読込されます。</p>
+              <p className="text-[7px] text-slate-500 leading-tight">※同じキーを入れた端末間で同期されます。</p>
            </div>
 
            <div className="pt-2 border-t border-white/5 space-y-2">
              <div className="flex justify-between"><span>AUTH_MODE:</span><span className="text-blue-400 font-bold">{user?.isAnonymous ? 'anonymous' : 'google'}</span></div>
-             <div className="flex justify-between"><span>PATH:</span><span className="truncate w-32 text-right opacity-50">{firestoreCollectionPath || 'local_only'}</span></div>
+             <div className="flex justify-between"><span>SYNC:</span><span className={firestoreCollectionPath ? 'text-green-500' : 'text-amber-500'}>{firestoreCollectionPath ? 'cloud' : 'local_only'}</span></div>
              {shareKey && (
                <button 
-                 onClick={() => saveData(data)}
-                 className="w-full py-2 bg-orange-600/20 text-orange-400 border border-orange-600/30 rounded font-bold hover:bg-orange-600/40 transition-all text-[8px]"
+                 onClick={() => { if(window.confirm("現在のリストをクラウドに上書き送信しますか？")) saveData(data); }}
+                 className="w-full py-2 bg-orange-600 text-white rounded font-bold hover:bg-orange-700 transition-all text-[8px] shadow-lg"
                >
                  UPLOAD CURRENT LIST TO CLOUD
                </button>
@@ -430,7 +418,7 @@ const GourmetApp = () => {
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600 transition-colors"><RotateCcw size={12}/> Refresh</button>
+          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600"><RotateCcw size={12}/> Refresh</button>
           <button onClick={async () => { if(window.confirm("全リセットしますか？")) { await signOut(auth); localStorage.clear(); window.location.reload(); } }} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset App</button>
         </div>
 
@@ -448,7 +436,7 @@ const GourmetApp = () => {
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
       <DiagnosticPanel />
 
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
         <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
           <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block italic">Gourmet Master</h1>
@@ -458,10 +446,9 @@ const GourmetApp = () => {
           <input type="text" placeholder="店名や住所で検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
         </div>
         <div className="flex items-center gap-2 shrink-0">
-           <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}><Cloud size={20} /></div>
+           <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`} title={firestoreCollectionPath ? '同期中' : 'ローカルモード'}><Cloud size={20} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-300'} /></div>
            <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
              <Upload size={20} />
-             {/* 修正: onChange を追加 */}
              <input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
            </label>
            {(!user || user.isAnonymous) && (
