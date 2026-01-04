@@ -26,7 +26,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.42-STABLE-FINAL";
+const VERSION = "v3.44-STABLE-DIAG-FIX";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -37,9 +37,9 @@ class ErrorBoundary extends Component {
       return (
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center text-xs">
           <ShieldAlert size={48} className="text-rose-500 mb-4" />
-          <h1 className="text-lg font-black uppercase">System Error</h1>
-          <p className="mt-2 text-rose-400">{this.state.error?.message}</p>
-          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-bold uppercase">Reload App</button>
+          <h1 className="text-lg font-black uppercase tracking-tighter">System Error</h1>
+          <p className="mt-2 text-rose-400 font-bold">{this.state.error?.message}</p>
+          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload Application</button>
         </div>
       );
     }
@@ -79,33 +79,25 @@ const getSubArea = (pref, address = "") => {
   if (!address) return "主要エリア";
   if (pref === '東京都') {
     if (address.match(/千代田|中央|港|新宿|文京|台東|墨田|江東|品川|目黒|大田|世田谷|渋谷|中野|杉並|豊島|北|荒川|板橋|練馬|足立|葛飾|江戸川/)) return "23区内";
-    if (address.match(/武蔵野|三鷹|調布|府中|小金井|国分寺|国立|町田|立川|八王子/)) return "多摩エリア";
-    return "都下・その他";
-  }
-  if (pref === '大阪府') {
-    if (address.includes('大阪市')) return "大阪市内";
-    return "北摂・東大阪";
+    return "都内・その他";
   }
   const match = address.match(/^.*?[市郡区]/);
   return match ? match[0].replace(pref, "") : "主要エリア";
 };
 
-const normalizePrefecture = (name) => {
-  if (!name) return "";
-  const match = PREF_ORDER.find(p => p.startsWith(name) || name.startsWith(p));
-  return match || "";
-};
-
 const sanitizeId = (text) => encodeURIComponent(text || '').replace(/%/g, '_').replace(/\./g, '_');
 
-// --- 1. Firebase 設定復旧 (v3.40 方式) ---
+// --- 1. Firebase 設定の決定 ---
+let configSource = "none";
 const getFirebaseConfig = () => {
   try {
     if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+      configSource = "runtime";
       return { firebaseConfig: JSON.parse(__firebase_config), isEnvConfig: true };
     }
     const env = import.meta.env || {};
     if (env.VITE_FIREBASE_API_KEY) {
+      configSource = "env";
       return {
         firebaseConfig: {
           apiKey: env.VITE_FIREBASE_API_KEY,
@@ -118,12 +110,12 @@ const getFirebaseConfig = () => {
         isEnvConfig: true
       };
     }
-  } catch (e) { console.error("CONFIG_PARSE_ERR", e); }
+  } catch (e) { console.error("CONFIG_ERR", e); }
   return { firebaseConfig: null, isEnvConfig: false };
 };
 
 const { firebaseConfig, isEnvConfig } = getFirebaseConfig();
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-final';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
 
 let firebaseApp = null;
 let auth = null;
@@ -134,15 +126,11 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
-    // 永続化設定は初期化時に非同期で投げておく
-    setPersistence(auth, browserLocalPersistence);
   } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
 }
 
 const canUseCloud = Boolean(auth && db);
-
 const checkIsMobile = () => {
-  if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent;
   const isIPadOS = (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua));
   return /iPhone|iPod|Android/i.test(ua) || isIPadOS;
@@ -159,17 +147,16 @@ const GourmetApp = () => {
   const [libLoaded, setLibLoaded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
-  const [isLocating, setIsLocating] = useState(false);
 
-  // 診断用 state
+  // 診断用
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [logs, setLogs] = useState([]);
-  const [redirectStatus, setRedirectStatus] = useState({ status: 'wait', code: '-' });
   const [envStatus, setEnvStatus] = useState({});
   const [loginAttempted, setLoginAttempted] = useState(() => localStorage.getItem('gourmet_login_attempt') === 'true');
+  const [redirectResultLog, setRedirectResultLog] = useState({ status: 'wait', code: '-' });
 
   const addLog = (event, value = "-") => {
-    const time = new Date().toLocaleTimeString([], { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+    const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
     setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 50));
   };
 
@@ -181,28 +168,45 @@ const GourmetApp = () => {
   const [isAddingNew, setIsAddingNew] = useState(false);
 
   const isMobile = useMemo(() => checkIsMobile(), []);
-  const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
-  // 初期環境診断 & URL解析
+  // [決定打ログ1] 初期化時診断
   useEffect(() => {
-    const status = { cookies: navigator.cookieEnabled, ls: false, idb: false };
-    try { localStorage.setItem("__t", "1"); localStorage.removeItem("__t"); status.ls = true; } catch(e){}
-    try { const req = indexedDB.open("__t_idb"); req.onsuccess = () => { status.idb = true; setEnvStatus({...status}); }; } catch(e){}
-    setEnvStatus(status);
+    const testStorage = (type) => {
+      try { const key = `__test_${type}`; window[type].setItem(key, "1"); window[type].removeItem(key); return "OK"; } catch(e) { return "FAIL"; }
+    };
+    const testIDB = () => new Promise(resolve => {
+      try { const req = indexedDB.open("__test_idb"); req.onsuccess = () => resolve("OK"); req.onerror = () => resolve("FAIL"); } catch(e) { resolve("FAIL"); }
+    });
 
-    const href = window.location.href;
-    addLog("AFTER_RETURN_HREF", href);
-    const searchParams = new URLSearchParams(window.location.search);
-    const keys = Array.from(searchParams.keys());
-    addLog("URL_SEARCH_KEYS", keys.length > 0 ? keys.join(",") : "none");
-    
-    // apiKey, authType, firebaseError, __auth 等があれば Firebase の戻りと判定
-    const hasAuthParams = href.includes("apiKey") || href.includes("authType") || href.includes("firebaseError") || href.includes("__auth") || href.includes("code=") || href.includes("state=");
-    addLog("HAS_AUTH_PARAMS", String(hasAuthParams));
-    addLog("CAN_USE_CLOUD", String(canUseCloud));
+    const runInitCheck = async () => {
+      const ls = testStorage('localStorage');
+      const ss = testStorage('sessionStorage');
+      const idb = await testIDB();
+      const ssKeys = (() => { try { return Object.keys(sessionStorage).join(","); } catch(e) { return "FAIL"; } })();
+      
+      setEnvStatus({ ls, ss, idb, cookies: navigator.cookieEnabled });
+
+      addLog("FIREBASE_APP_NAME", firebaseApp?.name || "null");
+      addLog("AUTH_DOMAIN", firebaseConfig?.authDomain || "null");
+      addLog("PROJECT_ID", firebaseConfig?.projectId || "null");
+      addLog("CONFIG_SOURCE", configSource);
+      addLog("ORIGIN", window.location.origin);
+      addLog("HOSTNAME", window.location.hostname);
+      addLog("HREF", window.location.href);
+      addLog("LS_TEST", ls);
+      addLog("SS_TEST", ss);
+      addLog("IDB_TEST", idb);
+      addLog("SESSION_STORAGE_KEYS", ssKeys);
+
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+        addLog("PERSISTENCE_SET_RESULT", "SUCCESS");
+      } catch(e) { addLog("PERSISTENCE_SET_RESULT", `FAIL:${e.code}`); }
+    };
+    runInitCheck();
   }, []);
 
-  // 認証ロジック (iOS対応)
+  // [決定打ログ2] 認証プロセス診断
   useEffect(() => {
     if (!cloudMode || !auth) {
       if (!cloudMode) setUser({ uid: 'local-user' });
@@ -210,45 +214,49 @@ const GourmetApp = () => {
       return;
     }
 
+    addLog("AUTH_CURRENT_USER_AT_START", auth.currentUser?.uid || "null");
     addLog("GET_REDIRECT_START");
+
     getRedirectResult(auth)
       .then((res) => {
         if (res?.user) {
           addLog("GET_REDIRECT_SUCCESS", res.user.uid);
-          setRedirectStatus({ status: 'success', code: 'OK' });
+          setRedirectResultLog({ status: 'success', code: 'OK' });
           setUser(res.user);
           localStorage.removeItem('gourmet_login_attempt');
           setLoginAttempted(false);
         } else {
           addLog("GET_REDIRECT_NO_RESULT");
-          setRedirectStatus({ status: 'no_result', code: '-' });
+          setRedirectResultLog({ status: 'no_result', code: '-' });
         }
+        addLog("AUTH_CURRENT_USER_AFTER_REDIRECT", auth.currentUser?.uid || "null");
       })
       .catch((err) => {
-        addLog("GET_REDIRECT_ERROR", err.code);
-        setRedirectStatus({ status: 'error', code: err.code });
+        addLog("GET_REDIRECT_ERROR", `${err.code}: ${err.message}`);
+        setRedirectResultLog({ status: 'error', code: err.code });
         setAuthError(`Auth Error: ${err.code}`);
       });
 
     const unsub = onAuthStateChanged(auth, (u) => {
       addLog("AUTH_STATE_CHANGED", u ? u.uid : "null");
-      if (u) { setUser(u); localStorage.removeItem('gourmet_login_attempt'); setLoginAttempted(false); }
-      else { setUser(null); }
+      if (u) { 
+        setUser(u); 
+        localStorage.removeItem('gourmet_login_attempt'); 
+        setLoginAttempted(false); 
+      } else { 
+        setUser(null); 
+      }
       setAuthChecked(true);
-    });
-
-    [1000, 3000, 5000].forEach(ms => {
-      setTimeout(() => addLog(`DELAYED_CHECK_${ms}ms`, auth.currentUser ? auth.currentUser.uid : "null"), ms);
     });
 
     return () => unsub();
   }, [cloudMode]);
 
-  const startLogin = () => {
+  const startLogin = async () => {
     if (!auth) return;
     addLog("START_LOGIN_CLICKED");
-    addLog("HOSTNAME", window.location.hostname);
-    addLog("HREF_BEFORE_REDIRECT", window.location.href);
+    addLog("BEFORE_SIGNIN_HREF", window.location.href);
+    addLog("PROVIDER_ID", "google.com");
 
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });
@@ -257,16 +265,21 @@ const GourmetApp = () => {
     setLoginAttempted(true);
 
     try {
-      // iOS Safari のため、一切の await を挟まず即座に遷移
+      // iPhone Safari の ITP/コンテキスト制限を避けるため、クリック直後に非同期を挟まず呼び出す
       if (isMobile) {
         addLog("SIGN_IN_REDIRECT_CALL");
         signInWithRedirect(auth, provider);
+        addLog("AFTER_SIGNIN_CALL");
       } else {
         addLog("SIGN_IN_POPUP_CALL");
-        signInWithPopup(auth, provider).then(res => { if (res?.user) setUser(res.user); });
+        const res = await signInWithPopup(auth, provider);
+        if (res?.user) {
+          addLog("SIGN_IN_POPUP_SUCCESS", res.user.uid);
+          setUser(res.user); 
+        }
       }
     } catch (err) {
-      addLog("LOGIN_EXEC_ERROR", err.code);
+      addLog("LOGIN_EXEC_ERROR", `${err.code}: ${err.message}`);
       setAuthError(`認証失敗: ${err.code}`);
       localStorage.removeItem('gourmet_login_attempt');
       setLoginAttempted(false);
@@ -283,7 +296,7 @@ const GourmetApp = () => {
     } catch(e) { addLog("HARD_SIGNOUT_FAIL", e.message); }
   };
 
-  // データ購読
+  // データ同期・操作
   useEffect(() => {
     if (!user || user.uid.startsWith('local')) { loadLocalData(); return; }
     setIsSyncing(true);
@@ -339,13 +352,6 @@ const GourmetApp = () => {
     }
   };
 
-  // ジャンル・統計用
-  const stats = useMemo(() => {
-    const res = { total: data.length, categories: {} };
-    data.filter(Boolean).forEach(d => { res.categories[d.カテゴリ] = (res.categories[d.カテゴリ] || 0) + 1; });
-    return res;
-  }, [data]);
-
   const filteredData = useMemo(() => {
     let res = data.filter(Boolean);
     if (activeTab === 'favorites') res = res.filter(d => d.isFavorite);
@@ -376,40 +382,45 @@ const GourmetApp = () => {
   }, []);
 
   if (!authChecked) {
-    return <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
-      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
-      <p className="font-black text-slate-400 uppercase tracking-tighter text-[10px]">Verifying System...</p>
-    </div>;
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
+        <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
+        <p className="font-black text-slate-400 uppercase tracking-tighter text-[10px]">Verifying System...</p>
+      </div>
+    );
   }
 
-  // UI パーツ
+  // UI パーツ: 診断パネル
   const DiagnosticPanel = () => (
-    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[10px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[70vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
-      <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer" onClick={() => setIsDebugOpen(!isDebugOpen)}>
-        <span className="font-bold text-orange-500 flex items-center gap-2"><Bug size={12}/> DIAGNOSTIC SYSTEM</span>
+    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[9px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[70vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
+      <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shadow-lg" onClick={() => setIsDebugOpen(!isDebugOpen)}>
+        <span className="font-bold text-orange-500 flex items-center gap-2 uppercase tracking-widest"><Bug size={12}/> Diagnostic Panel</span>
         {isDebugOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
       </div>
       <div className="p-4 space-y-4 overflow-y-auto h-full pb-20 scrollbar-hide">
         <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-1">
-          <div className="flex justify-between"><span>Cookies:</span><span>{String(envStatus.cookies)}</span></div>
-          <div className="flex justify-between"><span>LocalStorage:</span><span className={envStatus.ls?"text-green-500":"text-rose-500"}>{envStatus.ls?"OK":"FAIL"}</span></div>
-          <div className="flex justify-between"><span>Login Attempted:</span><span className={loginAttempted?"text-orange-500":"text-slate-500"}>{String(loginAttempted)}</span></div>
+          <div className="flex justify-between font-bold text-[10px] mb-1 text-slate-500"><span>Environment Status</span><span className="text-orange-600">{VERSION}</span></div>
+          <div className="flex justify-between"><span>Cookies:</span><span className={envStatus.cookies?"text-green-500":"text-rose-500"}>{String(envStatus.cookies)}</span></div>
+          <div className="flex justify-between"><span>LS/SS/IDB:</span><span>{envStatus.ls}/{envStatus.ss}/{envStatus.idb}</span></div>
+          <div className="flex justify-between"><span>Attempted:</span><span className={loginAttempted?"text-orange-500":"text-slate-500"}>{String(loginAttempted)}</span></div>
         </div>
-        {redirectStatus.status === 'no_result' && loginAttempted && !user && (
-          <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-200 text-[9px] leading-relaxed">
-            <ShieldAlert size={14} className="mb-1" />
-            <p className="font-bold underline mb-1">リダイレクト結果がありません</p>
-            ログイン後にこの表示が出る場合は Authorized Domains / リダイレクト設定を確認してください。
+        
+        {redirectResultLog.status === 'no_result' && loginAttempted && !user && (
+          <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-200 leading-relaxed space-y-2">
+            <p className="font-bold italic flex items-center gap-2"><ShieldAlert size={14}/> リダイレクト結果がありません</p>
+            <p>ログイン後にこの表示が出る場合は、Firebase Consoleで <b>{window.location.hostname}</b> が「承認済みドメイン」に登録されているか確認してください。</p>
           </div>
         )}
+
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={() => window.location.reload()} className="py-2 bg-slate-700 rounded font-bold flex items-center justify-center gap-1"><RotateCcw size={10}/> Reload</button>
-          <button onClick={hardSignOut} className="py-2 bg-rose-900/60 rounded font-bold flex items-center justify-center gap-1 text-rose-100"><Trash size={10}/> Hard SignOut</button>
+          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600 transition-colors"><RotateCcw size={12}/> Refresh UI</button>
+          <button onClick={hardSignOut} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset Session</button>
         </div>
+
         <div className="space-y-1">
-          <div className="flex justify-between items-center"><span className="text-slate-500 uppercase tracking-widest">Auth Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Copied"); }} className="text-orange-500 text-[8px] hover:underline">COPY ALL</button></div>
-          <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-64 overflow-y-auto text-[9px]">
-            {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-bold shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
+          <div className="flex justify-between items-center"><span className="text-slate-500 uppercase tracking-widest font-black">Auth Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline bg-orange-500/5 px-2 py-1 rounded">COPY ALL LOGS</button></div>
+          <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-64 overflow-y-auto text-[8px] scrollbar-hide">
+            {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
           </div>
         </div>
       </div>
@@ -422,13 +433,13 @@ const GourmetApp = () => {
 
       {!user ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 font-sans text-center">
-          <div className="animate-in fade-in duration-700 max-w-sm">
+          <div className="animate-in fade-in duration-1000 max-w-sm">
             <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl mb-8 inline-block"><Store size={40} /></div>
             <h2 className="text-3xl font-black text-slate-800 mb-2 uppercase italic tracking-tighter">Gourmet Master</h2>
-            <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストを同期しましょう。</p>
-            {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold border border-rose-100 flex items-center gap-2 text-left"><ShieldAlert className="shrink-0" size={16}/> {authError}</div>}
+            <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストを同期管理しましょう。</p>
+            {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold border border-rose-100 flex items-center gap-2 text-left shadow-sm"><ShieldAlert className="shrink-0" size={16}/> {authError}</div>}
             <button onClick={startLogin} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black shadow-2xl hover:bg-slate-800 active:scale-95 transition-all flex items-center justify-center gap-3 text-lg"><Cloud size={24} /> Googleでログイン</button>
-            <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase">ログインせずに開始</button>
+            <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase underline underline-offset-8 decoration-slate-100">ログインせずに開始</button>
           </div>
         </div>
       ) : (
@@ -444,15 +455,13 @@ const GourmetApp = () => {
             </div>
             <div className="flex items-center gap-2 shrink-0">
                <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}><Cloud size={20} /></div>
-               <label className={`p-2.5 rounded-2xl shadow-xl transition-all active:scale-95 hidden sm:flex bg-slate-900 text-white cursor-pointer hover:bg-slate-800`}>
-                 <Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={(e) => { /* Excel読込処理 */ }} />
-               </label>
+               <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex"><Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" /></label>
             </div>
           </header>
 
           <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
             {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600 border-b-4 border-transparent'}`}>
                 {tab.icon} {tab.label}
               </button>
             ))}
@@ -466,45 +475,43 @@ const GourmetApp = () => {
                   return (
                     <button key={reg} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[190px] relative overflow-hidden active:scale-95">
                       <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:opacity-10 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
-                      <div className="relative z-10"><p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-1">{reg} Area</p><h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors">{reg}</h3></div>
-                      <div className="relative z-10 mt-6 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-500 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors">{count} STORES</span><ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
+                      <div className="relative z-10"><p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] mb-1">{reg} Area</p><h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors uppercase tracking-tighter">{reg}</h3></div>
+                      <div className="relative z-10 mt-6 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-400 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors uppercase">{count} STORES</span><ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
                     </button>
                   );
                 })}
               </div>
             ) : (
-              <div className="flex flex-col lg:flex-row gap-10">
+              <div className="flex flex-col lg:flex-row gap-10 animate-in slide-in-from-bottom-6 duration-700">
                 <aside className="lg:w-72 shrink-0 hidden lg:block">
-                   <div className="bg-white p-7 rounded-[3rem] border border-slate-200/60 shadow-sm sticky top-44 space-y-7 max-h-[60vh] overflow-y-auto scrollbar-hide">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b pb-4 italic"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
+                   <div className="bg-white p-7 rounded-[3rem] border border-slate-200 shadow-sm sticky top-44 space-y-7 max-h-[60vh] overflow-y-auto scrollbar-hide">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b border-slate-50 pb-4 italic"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
-                      <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm">
+                      <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest">
                         <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-2 py-0.5 rounded shadow-sm">{stores.length}</span>
                       </button>
                     ))}
                   </div>
                 </aside>
                 <div className="flex-1 space-y-20 min-w-0">
-                  {groupedData.length === 0 ? <div className="bg-white p-20 rounded-[3rem] text-center text-slate-300 font-black italic shadow-inner">お店が見つかりませんでした</div> : groupedData.map(([category, stores]) => (
+                  {groupedData.length === 0 ? <div className="bg-white p-20 rounded-[3rem] text-center text-slate-300 font-black italic shadow-inner flex flex-col items-center"><Info size={64} className="mb-4 opacity-10" />お店が見つかりませんでした</div> : groupedData.map(([category, stores]) => (
                     <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4">
                       <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter italic"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                         {stores.map(store => (
                           <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
                             <div className="relative h-60 overflow-hidden bg-slate-100">
-                              <img 
-                                src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`} 
-                                alt={store.店舗名} 
-                                className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" 
-                                onError={(e) => { if (e.currentTarget.dataset.fallback) return; e.currentTarget.dataset.fallback = "1"; e.currentTarget.src = `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`; }}
-                              />
+                              <img src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" onError={(e) => { if (e.currentTarget.dataset.fallback) return; e.currentTarget.dataset.fallback = "1"; e.currentTarget.src = `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`; }} />
                               <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div>
-                              <button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button>
-                              <div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight uppercase italic">{store.店舗名}</h4></div>
+                              <button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white shadow-lg' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button>
+                              <div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none space-y-1"><p className="text-[10px] font-black tracking-widest uppercase opacity-70 flex items-center gap-2"><MapPin size={12} className="text-orange-400" /> {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight uppercase italic">{store.店舗名}</h4></div>
                             </div>
-                            <div className="p-8 flex-1 flex flex-col font-bold text-sm text-slate-500 space-y-4 tracking-tight">
-                              <div className="flex items-start gap-4"><div className="bg-orange-50 p-2 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1 tracking-widest">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed">{store.住所}</span></div></div>
-                              {store.URL && store.URL !== '' && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black text-center"><span className="truncate text-xs tracking-widest uppercase flex-1">Visit Website</span></a>)}
+                            <div className="p-8 flex-1 flex flex-col justify-between gap-6 font-bold text-sm text-slate-500">
+                              <p className="line-clamp-2 leading-relaxed italic">{store.住所 || "住所情報がありません。"}</p>
+                              <div className="flex gap-3 pt-4 border-t border-slate-50">
+                                {store.URL && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex-1 py-3 bg-orange-50 text-orange-600 rounded-xl hover:bg-orange-600 hover:text-white transition-all text-center text-[10px] font-black uppercase tracking-widest">Visit Website</a>)}
+                                <button onClick={() => setEditingStore(store)} className="p-3 bg-slate-50 text-slate-300 hover:text-indigo-600 hover:bg-white rounded-xl transition-all shadow-inner"><Edit2 size={18}/></button>
+                              </div>
                             </div>
                           </div>
                         ))}
@@ -521,5 +528,10 @@ const GourmetApp = () => {
   );
 };
 
-const App = () => <ErrorBoundary><GourmetApp /></ErrorBoundary>;
+const App = () => (
+  <ErrorBoundary>
+    <GourmetApp />
+  </ErrorBoundary>
+);
+
 export default App;
