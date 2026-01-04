@@ -27,7 +27,8 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.52-SYNC-RELIABLE";
+// ★ バージョン定義
+const VERSION = "v3.53-SYNC-POWER";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -172,6 +173,8 @@ const GourmetApp = () => {
   useEffect(() => {
     localStorage.setItem('gourmet_share_key', shareKey);
     addLog("SHARE_KEY_UPDATED", shareKey || "none");
+    // キーが変わったら監視をリセットするためトリガーを引く
+    setSyncTrigger(prev => prev + 1);
   }, [shareKey]);
 
   useEffect(() => {
@@ -239,8 +242,6 @@ const GourmetApp = () => {
     const q = collection(db, firestoreCollectionPath);
     const unsub = onSnapshot(q, (snap) => {
       const stores = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      // 空のクラウドに上書きされるのを防ぐため、もしローカルにしかデータがない状態でクラウドに繋いだ場合は警告が必要だが、
-      // 基本は snapshot を優先する。
       setData(stores);
       setIsSyncing(false);
       addLog("SYNC_RECEIVED", `${stores.length}件`);
@@ -385,6 +386,7 @@ const GourmetApp = () => {
     <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[9px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[75vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
       <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shadow-lg" onClick={() => setIsDebugOpen(!isDebugOpen)}>
         <span className="font-bold text-orange-500 flex items-center gap-2 uppercase tracking-widest"><Bug size={12}/> SYSTEM INFO</span>
+        <span className="text-[7px] text-slate-500 font-mono">{VERSION}</span>
         {isDebugOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
       </div>
       <div className="p-4 space-y-4 overflow-y-auto h-full pb-20 scrollbar-hide">
@@ -397,10 +399,10 @@ const GourmetApp = () => {
                 type="text" 
                 value={shareKey} 
                 onChange={(e) => setShareKey(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
-                placeholder="例: my-sync-key"
+                placeholder="例: family-gourmet"
                 className="w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-white outline-none focus:border-orange-500/50 text-[10px]"
               />
-              <p className="text-[7px] text-slate-500 leading-tight">※同じキーを入れた端末間で同期されます。</p>
+              <p className="text-[7px] text-slate-500 leading-tight">※同じキーを入れた端末間で同期されます。反映されない場合は「UPLOAD」を押してください。</p>
            </div>
 
            <div className="pt-2 border-t border-white/5 space-y-2">
@@ -408,22 +410,22 @@ const GourmetApp = () => {
              <div className="flex justify-between"><span>SYNC:</span><span className={firestoreCollectionPath ? 'text-green-500' : 'text-amber-500'}>{firestoreCollectionPath ? 'cloud' : 'local_only'}</span></div>
              {shareKey && (
                <button 
-                 onClick={() => { if(window.confirm("現在のリストをクラウドに上書き送信しますか？")) saveData(data); }}
-                 className="w-full py-2 bg-orange-600 text-white rounded font-bold hover:bg-orange-700 transition-all text-[8px] shadow-lg"
+                 onClick={() => { if(window.confirm("現在の表示リストをクラウド(共有キー)へ上書き送信しますか？\nWindows側のデータをiPhoneへ送る際に使用します。")) saveData(data); }}
+                 className="w-full py-2 bg-orange-600 text-white rounded font-bold hover:bg-orange-700 transition-all text-[8px] shadow-lg flex items-center justify-center gap-2"
                >
-                 UPLOAD CURRENT LIST TO CLOUD
+                 <Upload size={10}/> UPLOAD CURRENT LIST TO CLOUD
                </button>
              )}
            </div>
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600"><RotateCcw size={12}/> Refresh</button>
+          <button onClick={() => setSyncTrigger(prev => prev + 1)} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600"><RotateCcw size={12}/> Refresh Sync</button>
           <button onClick={async () => { if(window.confirm("全リセットしますか？")) { await signOut(auth); localStorage.clear(); window.location.reload(); } }} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset App</button>
         </div>
 
         <div className="space-y-1">
-          <div className="flex justify-between items-center font-black text-slate-500 uppercase tracking-widest"><span>Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline">COPY</button></div>
+          <div className="flex justify-between items-center font-black text-slate-500 uppercase tracking-widest"><span>Timeline Log</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline">COPY</button></div>
           <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-72 overflow-y-auto text-[8px] scrollbar-hide">
             {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
           </div>
@@ -439,14 +441,22 @@ const GourmetApp = () => {
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
         <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
-          <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block italic">Gourmet Master</h1>
+          <div className="hidden md:block">
+            <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase italic">Gourmet Master</h1>
+            <p className="text-[8px] font-bold text-slate-400 -mt-1 tracking-widest">{VERSION}</p>
+          </div>
         </div>
         <div className="flex-1 max-w-xl relative group">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
           <input type="text" placeholder="店名や住所で検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
         </div>
         <div className="flex items-center gap-2 shrink-0">
-           <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`} title={firestoreCollectionPath ? '同期中' : 'ローカルモード'}><Cloud size={20} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-300'} /></div>
+           <div className="flex items-center gap-1.5 px-3 py-2 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
+             <Cloud size={16} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-300'} />
+             <span className={`text-[9px] font-black uppercase tracking-tighter ${firestoreCollectionPath ? 'text-orange-600' : 'text-slate-400'}`}>
+               {firestoreCollectionPath ? 'Cloud' : 'Local'}
+             </span>
+           </div>
            <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
              <Upload size={20} />
              <input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
@@ -522,6 +532,11 @@ const GourmetApp = () => {
       </main>
 
       <button onClick={() => {}} className="fixed bottom-12 right-12 sm:hidden w-20 h-20 bg-gradient-to-br from-orange-500 to-rose-500 text-white rounded-full shadow-2xl flex items-center justify-center z-[90] active:scale-125 transition-all shadow-orange-500/50"><Plus size={40}/></button>
+      
+      {/* 画面下部にもバージョンを表示 */}
+      <footer className="w-full py-4 text-center text-[8px] font-black text-slate-300 uppercase tracking-widest bg-white border-t sm:hidden">
+        {VERSION} | GOURMET MASTER SYSTEM
+      </footer>
     </div>
   );
 };
