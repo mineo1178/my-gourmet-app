@@ -5,7 +5,7 @@ import {
   Loader2, Map as MapIcon, Grid, Database, 
   ChevronRight, Layers, ArrowDown, 
   Cloud, Copy, RefreshCcw, ShieldAlert, List,
-  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash
+  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash, Key, ToggleLeft, ToggleRight
 } from 'lucide-react';
 
 // Firebase SDK インポート
@@ -26,7 +26,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.44-STABLE-DIAG-FIX";
+const VERSION = "v3.45-AUTH-CHAIN-DIAG";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -37,9 +37,9 @@ class ErrorBoundary extends Component {
       return (
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center text-xs">
           <ShieldAlert size={48} className="text-rose-500 mb-4" />
-          <h1 className="text-lg font-black uppercase tracking-tighter">System Error</h1>
+          <h1 className="text-lg font-black uppercase tracking-tighter">Diagnostic Error</h1>
           <p className="mt-2 text-rose-400 font-bold">{this.state.error?.message}</p>
-          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload Application</button>
+          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-black uppercase shadow-2xl transition-all">Reload</button>
         </div>
       );
     }
@@ -87,7 +87,7 @@ const getSubArea = (pref, address = "") => {
 
 const sanitizeId = (text) => encodeURIComponent(text || '').replace(/%/g, '_').replace(/\./g, '_');
 
-// --- 1. Firebase 設定の決定 ---
+// --- 1. Firebase 設定復旧 ---
 let configSource = "none";
 const getFirebaseConfig = () => {
   try {
@@ -126,6 +126,7 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
+    setPersistence(auth, browserLocalPersistence);
   } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
 }
 
@@ -153,7 +154,7 @@ const GourmetApp = () => {
   const [logs, setLogs] = useState([]);
   const [envStatus, setEnvStatus] = useState({});
   const [loginAttempted, setLoginAttempted] = useState(() => localStorage.getItem('gourmet_login_attempt') === 'true');
-  const [redirectResultLog, setRedirectResultLog] = useState({ status: 'wait', code: '-' });
+  const [forcePopupForiOS, setForcePopupForiOS] = useState(() => localStorage.getItem('diag_force_popup') === 'true');
 
   const addLog = (event, value = "-") => {
     const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
@@ -169,22 +170,16 @@ const GourmetApp = () => {
 
   const isMobile = useMemo(() => checkIsMobile(), []);
 
-  // [決定打ログ1] 初期化時診断
+  // [診断1] URL 構造の詳細解析
   useEffect(() => {
     const testStorage = (type) => {
       try { const key = `__test_${type}`; window[type].setItem(key, "1"); window[type].removeItem(key); return "OK"; } catch(e) { return "FAIL"; }
     };
-    const testIDB = () => new Promise(resolve => {
-      try { const req = indexedDB.open("__test_idb"); req.onsuccess = () => resolve("OK"); req.onerror = () => resolve("FAIL"); } catch(e) { resolve("FAIL"); }
-    });
-
-    const runInitCheck = async () => {
+    
+    const runFullInitDiag = async () => {
       const ls = testStorage('localStorage');
       const ss = testStorage('sessionStorage');
-      const idb = await testIDB();
-      const ssKeys = (() => { try { return Object.keys(sessionStorage).join(","); } catch(e) { return "FAIL"; } })();
-      
-      setEnvStatus({ ls, ss, idb, cookies: navigator.cookieEnabled });
+      setEnvStatus({ ls, ss, cookies: navigator.cookieEnabled });
 
       addLog("FIREBASE_APP_NAME", firebaseApp?.name || "null");
       addLog("AUTH_DOMAIN", firebaseConfig?.authDomain || "null");
@@ -192,21 +187,16 @@ const GourmetApp = () => {
       addLog("CONFIG_SOURCE", configSource);
       addLog("ORIGIN", window.location.origin);
       addLog("HOSTNAME", window.location.hostname);
-      addLog("HREF", window.location.href);
+      addLog("HREF_FULL", window.location.href);
+      addLog("URL_SEARCH", window.location.search || "none");
+      addLog("URL_HASH", window.location.hash || "none");
       addLog("LS_TEST", ls);
       addLog("SS_TEST", ss);
-      addLog("IDB_TEST", idb);
-      addLog("SESSION_STORAGE_KEYS", ssKeys);
-
-      try {
-        await setPersistence(auth, browserLocalPersistence);
-        addLog("PERSISTENCE_SET_RESULT", "SUCCESS");
-      } catch(e) { addLog("PERSISTENCE_SET_RESULT", `FAIL:${e.code}`); }
     };
-    runInitCheck();
+    runFullInitDiag();
   }, []);
 
-  // [決定打ログ2] 認証プロセス診断
+  // [診断2] 認証ライフサイクル監視
   useEffect(() => {
     if (!cloudMode || !auth) {
       if (!cloudMode) setUser({ uid: 'local-user' });
@@ -214,75 +204,75 @@ const GourmetApp = () => {
       return;
     }
 
-    addLog("AUTH_CURRENT_USER_AT_START", auth.currentUser?.uid || "null");
+    const getPendingKeys = () => {
+      try { return Object.keys(sessionStorage).filter(k => k.includes('firebase:pendingRedirect')).join(",") || "none"; }
+      catch(e) { return "ERROR"; }
+    };
+
+    addLog("AUTH_START_UID", auth.currentUser?.uid || "null");
+    addLog("PENDING_REDIRECT_BEFORE", getPendingKeys());
     addLog("GET_REDIRECT_START");
 
     getRedirectResult(auth)
       .then((res) => {
         if (res?.user) {
           addLog("GET_REDIRECT_SUCCESS", res.user.uid);
-          setRedirectResultLog({ status: 'success', code: 'OK' });
           setUser(res.user);
           localStorage.removeItem('gourmet_login_attempt');
           setLoginAttempted(false);
         } else {
           addLog("GET_REDIRECT_NO_RESULT");
-          setRedirectResultLog({ status: 'no_result', code: '-' });
         }
-        addLog("AUTH_CURRENT_USER_AFTER_REDIRECT", auth.currentUser?.uid || "null");
+        addLog("PENDING_REDIRECT_AFTER", getPendingKeys());
       })
       .catch((err) => {
         addLog("GET_REDIRECT_ERROR", `${err.code}: ${err.message}`);
-        setRedirectResultLog({ status: 'error', code: err.code });
         setAuthError(`Auth Error: ${err.code}`);
       });
 
     const unsub = onAuthStateChanged(auth, (u) => {
       addLog("AUTH_STATE_CHANGED", u ? u.uid : "null");
-      if (u) { 
-        setUser(u); 
-        localStorage.removeItem('gourmet_login_attempt'); 
-        setLoginAttempted(false); 
-      } else { 
-        setUser(null); 
-      }
+      if (u) { setUser(u); setLoginAttempted(false); localStorage.removeItem('gourmet_login_attempt'); }
+      else { setUser(null); }
       setAuthChecked(true);
     });
 
     return () => unsub();
   }, [cloudMode]);
 
-  const startLogin = async () => {
+  const startLogin = () => {
     if (!auth) return;
-    addLog("START_LOGIN_CLICKED");
-    addLog("BEFORE_SIGNIN_HREF", window.location.href);
-    addLog("PROVIDER_ID", "google.com");
-
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });
     setAuthError(null);
+
+    addLog("START_LOGIN_CLICKED");
+    addLog("PROVIDER_ID", "google.com");
+    addLog("REDIRECT_URI_EST", `https://${firebaseConfig?.authDomain}/__/auth/handler`);
+    addLog("BEFORE_SIGNIN_HREF", window.location.href);
+
     localStorage.setItem('gourmet_login_attempt', 'true');
     setLoginAttempted(true);
 
     try {
-      // iPhone Safari の ITP/コンテキスト制限を避けるため、クリック直後に非同期を挟まず呼び出す
-      if (isMobile) {
+      // iPhone でも Popup を試す設定がある場合、または非モバイルの場合
+      if (forcePopupForiOS || !isMobile) {
+        addLog("SIGN_IN_POPUP_CALL");
+        signInWithPopup(auth, provider).then(res => {
+          if (res?.user) { addLog("SIGN_IN_POPUP_SUCCESS", res.user.uid); setUser(res.user); }
+        }).catch(err => {
+          addLog("POPUP_FAIL_FALLBACK", err.code);
+          // Popup 失敗時に Redirect に落とす
+          if (!forcePopupForiOS) signInWithRedirect(auth, provider);
+        });
+      } else {
         addLog("SIGN_IN_REDIRECT_CALL");
         signInWithRedirect(auth, provider);
         addLog("AFTER_SIGNIN_CALL");
-      } else {
-        addLog("SIGN_IN_POPUP_CALL");
-        const res = await signInWithPopup(auth, provider);
-        if (res?.user) {
-          addLog("SIGN_IN_POPUP_SUCCESS", res.user.uid);
-          setUser(res.user); 
-        }
       }
     } catch (err) {
-      addLog("LOGIN_EXEC_ERROR", `${err.code}: ${err.message}`);
+      addLog("LOGIN_EXEC_ERROR", err.code);
       setAuthError(`認証失敗: ${err.code}`);
-      localStorage.removeItem('gourmet_login_attempt');
-      setLoginAttempted(false);
     }
   };
 
@@ -290,13 +280,13 @@ const GourmetApp = () => {
     addLog("HARD_SIGNOUT_START");
     try {
       await signOut(auth);
-      Object.keys(localStorage).forEach(k => { if(k.includes("firebase") || k.includes("gourmet")) localStorage.removeItem(k); });
+      Object.keys(localStorage).forEach(k => { if(k.includes("firebase") || k.includes("gourmet") || k.includes("diag")) localStorage.removeItem(k); });
       addLog("HARD_SIGNOUT_SUCCESS");
-      window.location.href = window.location.origin + window.location.pathname + "?t=" + Date.now();
+      window.location.reload();
     } catch(e) { addLog("HARD_SIGNOUT_FAIL", e.message); }
   };
 
-  // データ同期・操作
+  // --- UI復旧: 既存ロジック ---
   useEffect(() => {
     if (!user || user.uid.startsWith('local')) { loadLocalData(); return; }
     setIsSyncing(true);
@@ -382,44 +372,53 @@ const GourmetApp = () => {
   }, []);
 
   if (!authChecked) {
-    return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
-        <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
-        <p className="font-black text-slate-400 uppercase tracking-tighter text-[10px]">Verifying System...</p>
-      </div>
-    );
+    return <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
+      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
+      <p className="font-black text-slate-400 uppercase tracking-tighter text-[10px]">Verifying System...</p>
+    </div>;
   }
 
-  // UI パーツ: 診断パネル
+  // UI パーツ
   const DiagnosticPanel = () => (
-    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[9px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[70vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
+    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[9px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[80vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
       <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shadow-lg" onClick={() => setIsDebugOpen(!isDebugOpen)}>
-        <span className="font-bold text-orange-500 flex items-center gap-2 uppercase tracking-widest"><Bug size={12}/> Diagnostic Panel</span>
+        <span className="font-bold text-orange-500 flex items-center gap-2 uppercase tracking-widest"><Bug size={12}/> Diagnostic Panel ({VERSION})</span>
         {isDebugOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
       </div>
       <div className="p-4 space-y-4 overflow-y-auto h-full pb-20 scrollbar-hide">
-        <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-1">
-          <div className="flex justify-between font-bold text-[10px] mb-1 text-slate-500"><span>Environment Status</span><span className="text-orange-600">{VERSION}</span></div>
+        {/* 環境とトグル */}
+        <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-2">
           <div className="flex justify-between"><span>Cookies:</span><span className={envStatus.cookies?"text-green-500":"text-rose-500"}>{String(envStatus.cookies)}</span></div>
-          <div className="flex justify-between"><span>LS/SS/IDB:</span><span>{envStatus.ls}/{envStatus.ss}/{envStatus.idb}</span></div>
-          <div className="flex justify-between"><span>Attempted:</span><span className={loginAttempted?"text-orange-500":"text-slate-500"}>{String(loginAttempted)}</span></div>
+          <div className="flex justify-between"><span>LS/SS:</span><span>{envStatus.ls}/{envStatus.ss}</span></div>
+          <div className="flex justify-between items-center pt-1 border-t border-white/5">
+            <span>Force Popup (iOS):</span>
+            <button onClick={() => { const v = !forcePopupForiOS; setForcePopupForiOS(v); localStorage.setItem('diag_force_popup', String(v)); }} className="text-orange-500">
+              {forcePopupForiOS ? <ToggleRight size={20}/> : <ToggleLeft size={20}/>}
+            </button>
+          </div>
         </div>
-        
-        {redirectResultLog.status === 'no_result' && loginAttempted && !user && (
-          <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-200 leading-relaxed space-y-2">
-            <p className="font-bold italic flex items-center gap-2"><ShieldAlert size={14}/> リダイレクト結果がありません</p>
-            <p>ログイン後にこの表示が出る場合は、Firebase Consoleで <b>{window.location.hostname}</b> が「承認済みドメイン」に登録されているか確認してください。</p>
+
+        {/* 設定確認ガイド */}
+        {loginAttempted && !user && (
+          <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-100 space-y-2 leading-relaxed">
+            <p className="font-black flex items-center gap-2 uppercase text-xs italic"><ShieldAlert size={14}/> Chain Breakdown Check</p>
+            <p className="border-b border-amber-500/20 pb-2">リダイレクトがアプリへ返っていません。以下を確認してください：</p>
+            <ul className="list-disc pl-4 space-y-1 text-[8px] font-bold">
+              <li>Firebase: Auth Domains に <b>{window.location.hostname}</b> があるか</li>
+              <li>Google Cloud: JS Origins に <b>{window.location.origin}</b> があるか</li>
+              <li>Google Cloud: Redirect URIs に <b>https://{firebaseConfig?.authDomain}/__/auth/handler</b> があるか</li>
+            </ul>
           </div>
         )}
 
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600 transition-colors"><RotateCcw size={12}/> Refresh UI</button>
-          <button onClick={hardSignOut} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900 transition-colors"><Trash size={12}/> Reset Session</button>
+          <button onClick={() => window.location.reload()} className="py-2.5 bg-slate-700 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-slate-600"><RotateCcw size={12}/> Refresh UI</button>
+          <button onClick={hardSignOut} className="py-2.5 bg-rose-900/60 rounded-lg font-bold flex items-center justify-center gap-2 text-rose-100 hover:bg-rose-900"><Trash size={12}/> Reset Session</button>
         </div>
 
         <div className="space-y-1">
-          <div className="flex justify-between items-center"><span className="text-slate-500 uppercase tracking-widest font-black">Auth Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline bg-orange-500/5 px-2 py-1 rounded">COPY ALL LOGS</button></div>
-          <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-64 overflow-y-auto text-[8px] scrollbar-hide">
+          <div className="flex justify-between items-center"><span className="text-slate-500 uppercase tracking-widest font-black">Auth Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline bg-orange-500/5 px-2 py-1 rounded">COPY LOGS</button></div>
+          <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-72 overflow-y-auto text-[8px] scrollbar-hide">
             {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
           </div>
         </div>
@@ -461,13 +460,13 @@ const GourmetApp = () => {
 
           <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
             {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600 border-b-4 border-transparent'}`}>
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
                 {tab.icon} {tab.label}
               </button>
             ))}
           </nav>
 
-          <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
+          <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen pb-40">
             {activeTab === 'map' ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 animate-in fade-in duration-700">
                 {Object.keys(regions).map(reg => {
@@ -482,19 +481,19 @@ const GourmetApp = () => {
                 })}
               </div>
             ) : (
-              <div className="flex flex-col lg:flex-row gap-10 animate-in slide-in-from-bottom-6 duration-700">
+              <div className="flex flex-col lg:flex-row gap-10">
                 <aside className="lg:w-72 shrink-0 hidden lg:block">
                    <div className="bg-white p-7 rounded-[3rem] border border-slate-200 shadow-sm sticky top-44 space-y-7 max-h-[60vh] overflow-y-auto scrollbar-hide">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b border-slate-50 pb-4 italic"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
-                      <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest">
+                      <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm">
                         <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-2 py-0.5 rounded shadow-sm">{stores.length}</span>
                       </button>
                     ))}
                   </div>
                 </aside>
                 <div className="flex-1 space-y-20 min-w-0">
-                  {groupedData.length === 0 ? <div className="bg-white p-20 rounded-[3rem] text-center text-slate-300 font-black italic shadow-inner flex flex-col items-center"><Info size={64} className="mb-4 opacity-10" />お店が見つかりませんでした</div> : groupedData.map(([category, stores]) => (
+                  {groupedData.length === 0 ? <div className="bg-white p-20 rounded-[3rem] text-center text-slate-300 font-black italic shadow-inner">お店が見つかりませんでした</div> : groupedData.map(([category, stores]) => (
                     <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4">
                       <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter italic"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
