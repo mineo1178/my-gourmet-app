@@ -18,10 +18,11 @@ import {
   onAuthStateChanged, 
   GoogleAuthProvider,
   signInWithRedirect,
+  signInWithPopup, // 追加
   getRedirectResult
 } from 'firebase/auth';
 
-console.log("### UI-REFINE CHECK v3.12 (Debug & Write Integrity Enhanced) ###");
+console.log("### UI-REFINE CHECK v3.13 (Mobile Popup Fix) ###");
 
 // --- 0. 定数定義 ---
 const PREF_ORDER = [
@@ -128,15 +129,6 @@ const App = () => {
   const [libLoaded, setLibLoaded] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0); // 強制再同期用
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedRegion, setSelectedRegion] = useState('全国');
-  const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
-  const [selectedSubArea, setSelectedSubArea] = useState('すべて');
-  const [viewMode, setViewMode] = useState('detail'); 
-  const [activeTab, setActiveTab] = useState('map'); 
-  const [editingStore, setEditingStore] = useState(null);
-  const [isAddingNew, setIsAddingNew] = useState(false);
-
   // Firestoreパスの計算
   const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
@@ -193,8 +185,19 @@ const App = () => {
         try {
           await getRedirectResult(auth);
           if (!auth.currentUser && isMounted) {
+            console.log("User not found. Initiating Login...");
             const provider = new GoogleAuthProvider();
-            await signInWithRedirect(auth, provider);
+            
+            // モバイルブラウザ判定 (navigator.userAgent)
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            
+            if (isMobile) {
+              console.log("Mobile device detected. Using signInWithPopup.");
+              await signInWithPopup(auth, provider);
+            } else {
+              console.log("Desktop device detected. Using signInWithRedirect.");
+              await signInWithRedirect(auth, provider);
+            }
           }
         } catch (err) {
           if (err.code === 'auth/unauthorized-domain') {
@@ -421,7 +424,6 @@ const App = () => {
             <input type="text" placeholder="店名、住所、メモを検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <div className="flex items-center gap-3">
-             {/* 修正2: クラウド表示を物理的な接続可能性に寄せる */}
              <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}>
                {(canUseCloud && cloudMode) ? <Cloud size={20} /> : <Database size={20} />}
              </div>
@@ -538,12 +540,12 @@ const App = () => {
                           viewMode === 'detail' ? (
                             <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
                               <div className="relative h-60 overflow-hidden bg-slate-100"><img src={getStoreImage(store)} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" /><div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div><button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button><div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest">{getRegionFromPref(store.都道府県)}</span><span className="px-2 py-0.5 bg-white/20 backdrop-blur rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight">{store.店舗名}</h4></div></div>
-                              <div className="p-8 flex-1 flex flex-col"><div className="space-y-4 text-sm flex-1 font-bold"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black mt-2"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1 group-hover/link:-translate-y-1"/><span className="truncate text-sm">詳しく見る</span></a>)}</div><div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
+                              <div className="p-8 flex-1 flex flex-col"><div className="space-y-4 text-sm flex-1 font-bold"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black mt-2"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1 group-hover/link:-translate-y-1"/><span className="truncate text-sm">詳しく見る</span></a>)}</div><div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black shadow-inner"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
                             </div>
                           ) : (
                             <div key={store.id} className="bg-white px-8 py-4 rounded-[2rem] border border-slate-200/60 shadow-sm hover:border-orange-500 hover:shadow-xl transition-all flex items-center justify-between group">
                               <div className="flex items-center gap-8 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2"> {store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-2 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '未分類')}</span></div></div></div>
-                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-pink-500' : 'text-slate-200'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3.5 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button><button onClick={() => deleteData(store.id)} className="p-3.5 text-slate-200 hover:text-rose-500 hover:bg-slate-50 rounded-2xl transition-colors"><Trash2 size={22}/></button></div>
+                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-rose-500 bg-rose-50' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3.5 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button><button onClick={() => deleteData(store.id)} className="p-3.5 text-slate-200 hover:text-rose-500 hover:bg-slate-50 rounded-2xl transition-colors"><Trash2 size={22}/></button></div>
                             </div>
                           )
                         ))}
