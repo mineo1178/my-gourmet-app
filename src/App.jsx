@@ -4,7 +4,7 @@ import {
   Upload, Trash2, Edit2, X, Store, Heart, Save, FileSpreadsheet, 
   FileText, Loader2, Map as MapIcon, Grid, Database, RefreshCw, 
   ChevronRight, PieChart, Info, Trash, Layers, ArrowDown, Layout, List, 
-  ChevronDown, ChevronUp, Navigation, Image as ImageIcon, Star, Cloud, AlertCircle
+  ChevronDown, ChevronUp, Navigation, Image as ImageIcon, Star, Cloud, AlertCircle, Copy, RefreshCcw
 } from 'lucide-react';
 
 // Firebase SDK インポート
@@ -21,7 +21,7 @@ import {
   getRedirectResult
 } from 'firebase/auth';
 
-console.log("### UI-REFINE CHECK v3.11 (Connecting Fix & StrictMode Stability) ###");
+console.log("### UI-REFINE CHECK v3.12 (Debug & Write Integrity Enhanced) ###");
 
 // --- 0. 定数定義 ---
 const PREF_ORDER = [
@@ -103,6 +103,7 @@ const getFirebaseConfig = () => {
 };
 
 const { firebaseConfig, isEnvConfig } = getFirebaseConfig();
+// デバッグ: appIdの混在を防ぐためここで確定
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
 
 let firebaseApp = null;
@@ -115,7 +116,6 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
   db = getFirestore(firebaseApp);
 }
 
-// クラウド利用可能判定 (真実の状態)
 const canUseCloud = Boolean(isEnvConfig && auth && db);
 
 const App = () => {
@@ -126,6 +126,7 @@ const App = () => {
   const [fsError, setFsError] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [libLoaded, setLibLoaded] = useState(false);
+  const [syncTrigger, setSyncTrigger] = useState(0); // 強制再同期用
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('全国');
@@ -135,6 +136,9 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('map'); 
   const [editingStore, setEditingStore] = useState(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
+
+  // Firestoreパスの計算
+  const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
   const stats = useMemo(() => {
     const res = { regions: {}, prefs: {}, subAreas: {}, total: data.length };
@@ -160,12 +164,11 @@ const App = () => {
     return () => { if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // --- 3. 認証処理 (整合性チェックの堅牢化) ---
+  // --- 3. 認証処理 ---
   useEffect(() => {
     let unsubAuth = null;
     let isMounted = true;
 
-    // 修正1: cloudMode=true かつ canUseCloud（物理的初期化完了）の場合のみ開始
     if (cloudMode && canUseCloud) {
       if (!auth || !db) {
         if (isMounted) {
@@ -177,14 +180,12 @@ const App = () => {
 
       unsubAuth = onAuthStateChanged(auth, (u) => { 
         if (!isMounted) return;
-        // 修正2: ユーザーがnull（未ログイン）の場合も状態を確定させてローディングを抜ける
         if (!u) {
+          console.log("No User Session. Waiting for login...");
           setUser({ uid: 'local-user' });
           return;
         }
-        const providerId = u.providerData[0]?.providerId || "google.com";
-        console.log("Auth UID:", u.uid);
-        console.log("Provider:", providerId);
+        console.log("Auth Active - UID:", u.uid);
         setUser(u); 
       });
 
@@ -192,24 +193,21 @@ const App = () => {
         try {
           await getRedirectResult(auth);
           if (!auth.currentUser && isMounted) {
-            console.log("User not found. Redirecting to Google Login...");
             const provider = new GoogleAuthProvider();
             await signInWithRedirect(auth, provider);
           }
         } catch (err) {
           if (err.code === 'auth/unauthorized-domain') {
-            const host = window.location.hostname || window.location.host || "current-domain";
-            console.error(`CRITICAL: Domain [${host}] is NOT authorized in Firebase Console.`);
+            const host = window.location.hostname || "current-domain";
             if (isMounted) {
               setCloudMode(false);
               setAuthError(`ドメイン[${host}]が許可されていません。Firebase設定が必要です。`);
               setUser({ uid: 'local-user' });
             }
           } else {
-            console.error("Auth System Error:", err.code);
             if (isMounted && !auth.currentUser) {
               setCloudMode(false);
-              setAuthError(`認証システムエラー (${err.code})`);
+              setAuthError(`認証エラー (${err.code})`);
               setUser({ uid: 'local-user' });
             }
           }
@@ -224,15 +222,17 @@ const App = () => {
       isMounted = false;
       if (typeof unsubAuth === "function") unsubAuth();
     };
-  }, [cloudMode]);
+  }, [cloudMode, syncTrigger]);
 
   // --- 4. データ同期 (canUseCloud 併用による安全化) ---
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.uid === 'local-user') {
+      loadLocalData();
+      return;
+    }
     let unsubSnapshot = null;
     
-    // 修正3: canUseCloud を併用
-    if (canUseCloud && cloudMode && db && user.uid !== 'local-user') {
+    if (canUseCloud && cloudMode && db) {
       setIsSyncing(true);
       const storesCol = collection(db, 'artifacts', appId, 'users', user.uid, 'stores');
       unsubSnapshot = onSnapshot(storesCol, 
@@ -243,7 +243,7 @@ const App = () => {
         }, 
         (err) => {
           console.error("Firestore Sync Error:", err.code);
-          setFsError(`Firestore同期エラー: ${err.code}`);
+          setFsError(`Firestore同期失敗: ${err.code}`);
           loadLocalData();
           setIsSyncing(false);
         }
@@ -255,13 +255,24 @@ const App = () => {
     return () => {
       if (typeof unsubSnapshot === "function") unsubSnapshot();
     };
-  }, [user, cloudMode]);
+  }, [user, cloudMode, syncTrigger]);
 
   const loadLocalData = () => {
     const saved = localStorage.getItem('gourmetStores');
     if (saved) { try { setData(JSON.parse(saved)); } catch (e) {} }
   };
 
+  const copyToClipboard = (text) => {
+    const el = document.createElement('textarea');
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    alert("コピーしました: " + text);
+  };
+
+  // --- 書き込み処理 (Error Handling 強化) ---
   const saveData = async (storesToSave) => {
     const newDataMap = new Map(data.map(item => [item.id, item]));
     storesToSave.forEach(store => {
@@ -271,7 +282,6 @@ const App = () => {
     });
     const allData = Array.from(newDataMap.values());
 
-    // 修正3: canUseCloud を併用
     if (canUseCloud && cloudMode && db && user && user.uid !== 'local-user') {
       setIsSyncing(true);
       try {
@@ -281,7 +291,10 @@ const App = () => {
           const payload = { ...store, id: docId };
           await setDoc(docRef, payload, { merge: true });
         }
-      } catch (e) { console.error("Save failed:", e); }
+      } catch (e) { 
+        console.error("Save Error:", e);
+        setFsError(`保存失敗 (理由: ${e.code})`);
+      }
       setIsSyncing(false);
     } else {
       setData(allData);
@@ -291,11 +304,13 @@ const App = () => {
 
   const deleteData = async (id) => {
     if (!window.confirm("この店舗を削除しますか？")) return;
-    // 修正3: canUseCloud を併用
     if (canUseCloud && cloudMode && db && user && user.uid !== 'local-user') {
       try {
         await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'stores', id));
-      } catch (e) { console.error(e); }
+      } catch (e) { 
+        console.error("Delete Error:", e);
+        setFsError(`削除失敗 (理由: ${e.code})`);
+      }
     } else {
       const filtered = data.filter(item => item.id !== id);
       setData(filtered);
@@ -303,38 +318,21 @@ const App = () => {
     }
   };
 
-  const filteredData = useMemo(() => {
-    let result = data;
-    if (activeTab === 'favorites') result = result.filter(item => item.isFavorite);
-    if (searchTerm) {
-      const t = searchTerm.toLowerCase();
-      result = result.filter(item => 
-        (item.店舗名 || '').toLowerCase().includes(t) || 
-        (item.住所 || '').toLowerCase().includes(t) ||
-        (item.カテゴリ || '').toLowerCase().includes(t)
-      );
+  const toggleFavorite = async (store) => {
+    if (canUseCloud && cloudMode && db && user && user.uid !== 'local-user') {
+      try {
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'stores', store.id);
+        await setDoc(docRef, { isFavorite: !store.isFavorite }, { merge: true });
+      } catch (e) {
+        console.error("Favorite Error:", e);
+        setFsError(`お気に入り更新失敗 (理由: ${e.code})`);
+      }
+    } else {
+      const updated = data.map(item => item.id === store.id ? { ...item, isFavorite: !item.isFavorite } : item);
+      setData(updated);
+      localStorage.setItem('gourmetStores', JSON.stringify(updated));
     }
-    if (selectedRegion !== '全国') {
-      result = result.filter(item => getRegionFromPref(item.都道府県) === selectedRegion);
-    }
-    if (selectedPrefecture !== 'すべて') {
-      result = result.filter(item => item.都道府県 === selectedPrefecture);
-    }
-    if (selectedSubArea !== 'すべて') {
-      result = result.filter(item => getSubArea(item.都道府県, item.住所) === selectedSubArea);
-    }
-    return result;
-  }, [data, searchTerm, selectedRegion, selectedPrefecture, selectedSubArea, activeTab]);
-
-  const groupedData = useMemo(() => {
-    const groups = {};
-    filteredData.forEach(item => {
-      const cat = item.カテゴリ || '未分類';
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(item);
-    });
-    return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
-  }, [filteredData]);
+  };
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
@@ -377,18 +375,6 @@ const App = () => {
     if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.pageYOffset - 180, behavior: 'smooth' });
   };
 
-  const toggleFavorite = async (store) => {
-    // 修正3: canUseCloud を併用
-    if (canUseCloud && cloudMode && db && user && user.uid !== 'local-user') {
-      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'stores', store.id);
-      await setDoc(docRef, { isFavorite: !store.isFavorite }, { merge: true });
-    } else {
-      const updated = data.map(item => item.id === store.id ? { ...item, isFavorite: !item.isFavorite } : item);
-      setData(updated);
-      localStorage.setItem('gourmetStores', JSON.stringify(updated));
-    }
-  };
-
   if (!user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-white">
@@ -400,6 +386,30 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100">
+      
+      {/* デバッグ情報オーバーレイ (デスクトップのみ) */}
+      <div className="hidden xl:block fixed top-24 right-6 z-[60] bg-slate-900/90 backdrop-blur text-white p-4 rounded-2xl shadow-2xl text-[10px] font-mono border border-white/10 space-y-2">
+        <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-2 mb-2">
+          <span className="font-bold text-orange-400 uppercase tracking-widest">Debug Console</span>
+          <button onClick={() => setSyncTrigger(t => t + 1)} className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded hover:bg-orange-500 transition-colors">
+            <RefreshCcw size={10} /> FORCE RESYNC
+          </button>
+        </div>
+        <div className="grid grid-cols-[60px,1fr] gap-x-2">
+          <span className="text-slate-500">MODE:</span><span className={canUseCloud && cloudMode ? "text-green-400" : "text-amber-400"}>{canUseCloud && cloudMode ? "CLOUD (Firestore)" : "LOCAL (Storage)"}</span>
+          <span className="text-slate-500">APP ID:</span><span>{appId}</span>
+          <span className="text-slate-500">UID:</span><span className="select-all">{user.uid}</span>
+          <span className="text-slate-500">COUNT:</span><span>{data.length} items</span>
+        </div>
+        <div className="mt-2 pt-2 border-t border-white/10 flex flex-col gap-1">
+          <span className="text-slate-500">DB PATH:</span>
+          <div className="flex items-center gap-1 bg-black/40 p-2 rounded break-all">
+            <span>{firestorePath}</span>
+            <button onClick={() => copyToClipboard(firestorePath)} className="shrink-0 p-1 hover:text-orange-400 transition-colors"><Copy size={12}/></button>
+          </div>
+        </div>
+      </div>
+
       <div className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 shadow-sm">
         <header className="max-w-7xl mx-auto px-4 h-16 md:h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 shrink-0 cursor-pointer group" onClick={() => {setSelectedRegion('全国'); setSelectedPrefecture('すべて'); setSelectedSubArea('すべて'); setActiveTab('map');}}>
@@ -411,14 +421,8 @@ const App = () => {
             <input type="text" placeholder="店名、住所、メモを検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <div className="flex items-center gap-3">
-             {user && user.uid !== 'local-user' && (
-               <div className="hidden lg:flex flex-col text-[10px] text-slate-400 font-mono leading-none text-right mr-2 select-all cursor-help" title={`Full UID: ${user.uid}`}>
-                 <div>UID: {user.uid.slice(0, 8)}...</div>
-                 <div>IDP: google.com</div>
-               </div>
-             )}
+             {/* 修正2: クラウド表示を物理的な接続可能性に寄せる */}
              <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}>
-               {/* 修正2: クラウド表示を物理的な接続可能性(canUseCloud)に寄せる */}
                {(canUseCloud && cloudMode) ? <Cloud size={20} /> : <Database size={20} />}
              </div>
              <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
@@ -426,6 +430,7 @@ const App = () => {
              </label>
           </div>
         </header>
+
         <div className="max-w-7xl mx-auto px-4 border-t border-slate-100 py-3 flex flex-col md:flex-row items-center justify-between gap-4">
           <nav className="flex items-center gap-1 w-full md:w-auto overflow-x-auto scrollbar-hide">
             {[ { id: 'map', label: 'エリア', icon: <MapIcon size={16} /> }, { id: 'list', label: 'リスト', icon: <Grid size={16} /> }, { id: 'favorites', label: 'お気に入り', icon: <Heart size={16} /> } ].map(tab => (
@@ -456,6 +461,7 @@ const App = () => {
           )}
         </div>
       </div>
+
       <main className="max-w-7xl mx-auto p-4 md:p-8">
         {(authError || fsError) && (
           <div className="mb-6 bg-rose-50 border border-rose-100 text-rose-600 px-5 py-4 rounded-3xl flex items-center justify-between text-sm font-bold shadow-sm animate-in slide-in-from-top duration-300">
@@ -463,6 +469,7 @@ const App = () => {
              <button onClick={() => { setAuthError(null); setFsError(null); }} className="hover:bg-rose-200/50 p-1 rounded-xl transition-colors"><X size={18}/></button>
           </div>
         )}
+
         {data.length === 0 ? (
           <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 md:p-24 rounded-[4rem] shadow-xl shadow-slate-200/40 border border-slate-100 animate-in fade-in zoom-in duration-700">
               <div className="bg-orange-50 w-28 h-28 rounded-[2.5rem] flex items-center justify-center mx-auto mb-10 rotate-6 group-hover:rotate-0 transition-transform">
@@ -527,21 +534,19 @@ const App = () => {
                     <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4 duration-500">
                       <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black uppercase shadow-lg shadow-orange-100">{stores.length} 件</span></div>
                       <div className={viewMode === 'detail' ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8" : "space-y-3"}>
-                        {stores.map(store => {
-                          const regionName = getRegionFromPref(store.都道府県);
-                          const subAreaName = getSubArea(store.都道府県, store.住所);
-                          return viewMode === 'detail' ? (
+                        {stores.map(store => (
+                          viewMode === 'detail' ? (
                             <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
-                              <div className="relative h-60 overflow-hidden bg-slate-100"><img src={getStoreImage(store)} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" /><div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div><button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button><div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest">{regionName}</span><span className="px-2 py-0.5 bg-white/20 backdrop-blur rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight">{store.店舗名}</h4></div></div>
-                              <div className="p-8 flex-1 flex flex-col"><div className="space-y-4 text-sm flex-1 font-bold"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {subAreaName}</p><span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black mt-2"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1 group-hover/link:-translate-y-1"/><span className="truncate text-sm">詳しく見る</span></a>)}</div><div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black shadow-inner"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
+                              <div className="relative h-60 overflow-hidden bg-slate-100"><img src={getStoreImage(store)} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" /><div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div><button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button><div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest">{getRegionFromPref(store.都道府県)}</span><span className="px-2 py-0.5 bg-white/20 backdrop-blur rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight">{store.店舗名}</h4></div></div>
+                              <div className="p-8 flex-1 flex flex-col"><div className="space-y-4 text-sm flex-1 font-bold"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black mt-2"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1 group-hover/link:-translate-y-1"/><span className="truncate text-sm">詳しく見る</span></a>)}</div><div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
                             </div>
                           ) : (
                             <div key={store.id} className="bg-white px-8 py-4 rounded-[2rem] border border-slate-200/60 shadow-sm hover:border-orange-500 hover:shadow-xl transition-all flex items-center justify-between group">
-                              <div className="flex items-center gap-8 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2"> {store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-2 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {regionName} | {store.都道府県} • {subAreaName}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '未分類')}</span></div></div></div>
-                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-rose-500 bg-rose-50' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3.5 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button><button onClick={() => deleteData(store.id)} className="p-3.5 text-slate-200 hover:text-rose-500 hover:bg-slate-50 rounded-2xl transition-colors"><Trash2 size={22}/></button></div>
+                              <div className="flex items-center gap-8 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2"> {store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-2 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '未分類')}</span></div></div></div>
+                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-pink-500' : 'text-slate-200'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3.5 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button><button onClick={() => deleteData(store.id)} className="p-3.5 text-slate-200 hover:text-rose-500 hover:bg-slate-50 rounded-2xl transition-colors"><Trash2 size={22}/></button></div>
                             </div>
-                          );
-                        })}
+                          )
+                        ))}
                       </div>
                     </div>
                   ))}
@@ -551,6 +556,7 @@ const App = () => {
           </div>
         )}
       </main>
+
       {(editingStore || isAddingNew) && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-md animate-in fade-in duration-300 px-4">
           <form onSubmit={async (e) => { e.preventDefault(); const fd = new FormData(e.target); const updated = Object.fromEntries(fd.entries()); await saveData([ { ...editingStore, ...updated } ]); setEditingStore(null); setIsAddingNew(false); }} className="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] border border-white/20">
