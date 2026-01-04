@@ -25,7 +25,7 @@ import {
   browserLocalPersistence
 } from 'firebase/auth';
 
-const VERSION = "v3.35-CDN-FIX";
+const VERSION = "v3.36-LIBLOAD-STABLE";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -178,6 +178,7 @@ const GourmetApp = () => {
   const [fsError, setFsError] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [libLoaded, setLibLoaded] = useState(false);
+  const [libError, setLibError] = useState(false); // エラー管理用
   const [needsLogin, setNeedsLogin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
@@ -235,30 +236,41 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
-  // ★ 修正箇所: XLSX CDN URLを正しい形式に修正
+  // --- 必須修正1: XLSX ロードロジックの適正化 ---
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => setLibLoaded(true);
-    script.onerror = () => setLibLoaded(true); 
+    script.onload = () => {
+      console.log("XLSX Loaded Successfully");
+      setLibLoaded(true);
+      setLibError(false);
+    };
+    script.onerror = () => {
+      console.error("XLSX Load Failed");
+      setLibError(true);
+      // libLoaded は false のままにしておく（UI制御のため）
+    }; 
     document.head.appendChild(script);
-    const timer = setTimeout(() => { setLibLoaded(true); }, 4000);
+
+    // タイムアウト監視 (window.XLSXの有無で最終判断)
+    const timer = setTimeout(() => {
+      if (!window.XLSX) {
+        console.warn("XLSX Load Timeout");
+        setLibError(true);
+      }
+    }, 5000);
+
     return () => { clearTimeout(timer); if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // 認証 (スマホ同期・リダイレクト安定化)
+  // 認証
   useEffect(() => {
     let unsubAuth = null;
     let isMounted = true;
-
     if (cloudMode && canUseCloud) {
       getRedirectResult(auth)
-        .then((res) => { 
-          if (res?.user && isMounted) {
-            console.log("Redirect login success.");
-          }
-        })
+        .then((res) => { if (res?.user && isMounted) console.log("Login Success"); })
         .catch((err) => {
           if (isMounted) {
             setAuthError(`Auth Error: ${err.code}`);
@@ -266,7 +278,6 @@ const GourmetApp = () => {
             setAuthChecked(true);
           }
         });
-
       unsubAuth = onAuthStateChanged(auth, (u) => { 
         if (!isMounted) return;
         if (!u) { setNeedsLogin(true); setUser(null); } 
@@ -379,9 +390,16 @@ const GourmetApp = () => {
     }
   };
 
+  // --- 必須修正3: ファイル取り込み (alert追加) ---
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file || !window.XLSX) return;
+    if (!file) return;
+
+    if (!window.XLSX) {
+      alert("XLSXライブラリ読込中です。数秒待ってから再度お試しください。");
+      return;
+    }
+
     const isCsv = file.name.toLowerCase().endsWith('.csv');
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -410,7 +428,7 @@ const GourmetApp = () => {
     if (isCsv) reader.readAsText(file, "UTF-8"); else reader.readAsArrayBuffer(file);
   };
 
-  if (!authChecked || !libLoaded) {
+  if (!authChecked) {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
         <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
@@ -465,9 +483,19 @@ const GourmetApp = () => {
            <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}>
              {(canUseCloud && cloudMode) ? <Cloud size={20} /> : <Database size={20} />}
            </div>
-           <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
-             <Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
+           
+           {/* 必須修正2: アップロードUIの無効化制御 */}
+           <label className={`p-2.5 rounded-2xl shadow-xl transition-all active:scale-95 hidden sm:flex ${libLoaded && window.XLSX ? 'bg-slate-900 text-white cursor-pointer hover:bg-slate-800' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`} title={!(libLoaded && window.XLSX) ? "エンジンの読込を待機中..." : ""}>
+             <Upload size={20} />
+             <input 
+               type="file" 
+               className="hidden" 
+               accept=".csv, .xlsx" 
+               onChange={handleFileUpload} 
+               disabled={!(libLoaded && window.XLSX)} 
+             />
            </label>
+
            <button onClick={() => { if(navigator.geolocation) { 
              setIsLocating(true);
              navigator.geolocation.getCurrentPosition(async (pos) => {
@@ -494,20 +522,10 @@ const GourmetApp = () => {
       </nav>
 
       <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
-        {(activeTab === 'list' || activeTab === 'favorites') && (
-          <div className="mb-8 flex flex-col sm:flex-row items-center gap-4 bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><MapPin size={12} /> 都道府県絞り込み:</label>
-            <select value={selectedPrefecture} onChange={(e) => setSelectedPrefecture(e.target.value)} className="w-full sm:w-64 p-3 bg-slate-50 border-none rounded-2xl text-xs font-black appearance-none focus:ring-4 focus:ring-orange-500/10 cursor-pointer">
-              <option value="すべて">すべて (ALL JAPAN)</option>
-              {PREF_ORDER.map(pref => (
-                <option key={pref} value={pref}>{pref} ({data.filter(Boolean).filter(d => d.都道府県 === pref).length})</option>
-              ))}
-            </select>
-            <div className="flex-1" />
-            <div className="flex p-1 bg-slate-100 rounded-xl">
-              <button onClick={() => setViewMode('detail')} className={`p-2 rounded-lg transition-all ${viewMode === 'detail' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}><Grid size={14}/></button>
-              <button onClick={() => setViewMode('compact')} className={`p-2 rounded-lg transition-all ${viewMode === 'compact' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}><List size={14}/></button>
-            </div>
+        {(authError || fsError) && (
+          <div className="mb-6 bg-rose-50 border border-rose-100 text-rose-600 px-5 py-4 rounded-3xl flex items-center justify-between text-xs font-bold shadow-sm animate-in slide-in-from-top">
+             <div className="flex items-center gap-3"><ShieldAlert size={18} /><span>{authError || fsError}</span></div>
+             <button onClick={() => { setAuthError(null); setFsError(null); }} className="hover:bg-rose-200/50 p-1 rounded-xl transition-colors"><X size={16}/></button>
           </div>
         )}
 
@@ -515,10 +533,12 @@ const GourmetApp = () => {
           <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100 animate-in zoom-in duration-700">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={80} />
               <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Import Required</h2>
-              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto leading-relaxed">エクセルデータを読み込んで同期を開始してください。</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
                 <button onClick={() => saveData([{id:'sample-1',店舗名:"サンプル名店 銀座",住所:"東京都中央区銀座1-1-1",カテゴリ:"和食",都道府県:"東京都",isFavorite:true,NO:1}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest uppercase">Sample Data</button>
-                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase">Upload CSV/XLSX<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
+                <label className={`py-5 border-2 rounded-[2rem] font-black transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase ${libLoaded && window.XLSX ? 'border-slate-200 text-slate-600 cursor-pointer hover:bg-slate-50' : 'border-slate-100 text-slate-300 cursor-not-allowed bg-slate-50'}`}>
+                  Upload CSV/XLSX
+                  <input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} disabled={!(libLoaded && window.XLSX)} />
+                </label>
               </div>
           </div>
         ) : (
@@ -586,7 +606,7 @@ const GourmetApp = () => {
                           ) : (
                             <div key={store.id} className="bg-white px-8 py-4 rounded-[2rem] border border-slate-200/60 shadow-sm hover:border-orange-500 hover:shadow-xl transition-all flex items-center justify-between group">
                               <div className="flex items-center gap-6 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL && store.URL !== '' ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2 italic uppercase tracking-tighter">{store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl uppercase italic tracking-tighter">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-1.5 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '飲食店')}</span></div></div></div>
-                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-rose-500 bg-rose-50' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button></div>
+                              <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'bg-rose-500 text-white' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button></div>
                             </div>
                           );
                         })}
