@@ -26,7 +26,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.39-AUTH-FIXED";
+const VERSION = "v3.40-AUTH-TRACE";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -56,7 +56,7 @@ class ErrorBoundary extends Component {
   }
 }
 
-// --- 0. ヘルパー・定数 ---
+// --- 0. 定数定義 ---
 const PREF_ORDER = [
   '北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県',
   '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県',
@@ -148,6 +148,7 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
+    setPersistence(auth, browserLocalPersistence).catch(e => console.error("INIT_PERSISTENCE_ERR", e));
   } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
 }
 
@@ -172,7 +173,11 @@ const GourmetApp = () => {
   const [needsLogin, setNeedsLogin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
-  const [isLocating, setIsLocating] = useState(false);
+
+  // 1) loginAttempted state & 永続化
+  const [loginAttempted, setLoginAttempted] = useState(() => {
+    return localStorage.getItem('gourmet_login_attempted') === 'true';
+  });
 
   // Auth Timeline ログシステム
   const [logs, setLogs] = useState([]);
@@ -197,7 +202,7 @@ const GourmetApp = () => {
   const isMobileDevice = useMemo(() => checkIsMobile(), []);
   const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
-  // 環境判定
+  // 環境判定 & 初期ログ
   useEffect(() => {
     const status = {
       cookies: navigator.cookieEnabled,
@@ -218,7 +223,15 @@ const GourmetApp = () => {
     } catch(e) { status.idb = false; setEnvStatus({...status}); }
     
     setEnvStatus(status);
-    addLog("PAGE_LOAD", { href: window.location.href, ref: document.referrer, ua: navigator.userAgent });
+
+    // 3) 戻ってきた直後のログ
+    const href = window.location.href;
+    addLog("AFTER_RETURN_HREF", href);
+    const hasOAuth = href.includes("code=") || href.includes("state=") || href.includes("oauth") || href.includes("__auth");
+    addLog("HAS_OAUTH_PARAMS", String(hasOAuth));
+    addLog("PAGE_LOAD_UA", navigator.userAgent);
+    addLog("PAGE_LOAD_SECURE", String(window.isSecureContext));
+
   }, []);
 
   const scrollToCategory = (id) => {
@@ -247,12 +260,16 @@ const GourmetApp = () => {
       getRedirectResult(auth)
         .then((res) => { 
           if (res?.user && isMounted) {
-            addLog("GET_REDIRECT_SUCCESS", { uid: res.user.uid, email: res.user.email });
+            addLog("GET_REDIRECT_SUCCESS", { uid: res.user.uid });
             setRedirectLog({ status: 'success', code: 'OK' });
             setUser(res.user); 
+            // 成功時はフラグ解除
+            localStorage.removeItem('gourmet_login_attempted');
+            setLoginAttempted(false);
           } else {
             addLog("GET_REDIRECT_NO_RESULT");
             setRedirectLog({ status: 'no_result', code: '-' });
+            // もしOAuthパラメータがあるのに no_result なら異常
           }
         })
         .catch((err) => {
@@ -267,13 +284,19 @@ const GourmetApp = () => {
 
       unsubAuth = onAuthStateChanged(auth, (u) => { 
         if (!isMounted) return;
-        addLog("AUTH_STATE_CHANGED", u ? { uid: u.uid, providers: u.providerData?.map(p => p.providerId) } : "null");
+        addLog("AUTH_STATE_CHANGED", u ? { uid: u.uid } : "null");
         if (!u) { setNeedsLogin(true); setUser(null); } 
-        else { setNeedsLogin(false); setUser(u); }
+        else { 
+          setNeedsLogin(false); 
+          setUser(u);
+          // ログインが確定したらフラグ解除
+          localStorage.removeItem('gourmet_login_attempted');
+          setLoginAttempted(false);
+        }
         setAuthChecked(true);
       });
 
-      // 遅延チェック (Safariセッション復元漏れ対策)
+      // 追跡ログ: Safari遅延対策
       [1000, 3000, 5000].forEach(ms => {
         setTimeout(() => {
           if(isMounted) addLog(`DELAYED_CHECK_${ms}ms`, auth.currentUser ? auth.currentUser.uid : "null");
@@ -291,13 +314,23 @@ const GourmetApp = () => {
     return () => { isMounted = false; if (typeof unsubAuth === "function") unsubAuth(); };
   }, [cloudMode]);
 
+  // 2) ログイン操作ログの強化
   const startLogin = async () => {
     if (!auth) return;
     const provider = new GoogleAuthProvider();
     setAuthError(null);
+
+    // 必須ログ追加
     addLog("START_LOGIN_CLICKED");
+    addLog("HOSTNAME", window.location.hostname);
+    addLog("HREF_BEFORE_REDIRECT", window.location.href);
+
     try {
       addLog("SET_PERSISTENCE_START");
+      // フラグを永続化（リダイレクト後にチェックするため）
+      localStorage.setItem('gourmet_login_attempted', 'true');
+      setLoginAttempted(true);
+
       await setPersistence(auth, browserLocalPersistence);
       addLog("SET_PERSISTENCE_SUCCESS");
 
@@ -313,9 +346,12 @@ const GourmetApp = () => {
         }
       }
     } catch (err) {
-      addLog("LOGIN_EXEC_ERROR", err.code);
-      setAuthError(`認証失敗: ${err.code}`);
+      addLog("LOGIN_EXEC_ERROR", { code: err.code, msg: err.message });
+      setAuthError(`認証失敗: ${err.code || err.message}`);
       setNeedsLogin(true);
+      // エラー時はフラグ解除
+      localStorage.removeItem('gourmet_login_attempted');
+      setLoginAttempted(false);
     }
   };
 
@@ -330,14 +366,14 @@ const GourmetApp = () => {
     try {
       await signOut(auth);
       Object.keys(localStorage).forEach(key => {
-        if(key.includes("firebase")) localStorage.removeItem(key);
+        if(key.includes("firebase") || key.includes("gourmet_login")) localStorage.removeItem(key);
       });
       addLog("HARD_SIGNOUT_SUCCESS");
       forceReloadNoCache();
     } catch(e) { addLog("HARD_SIGNOUT_FAIL", e.message); }
   };
 
-  // 統計データ用メモ
+  // 統計・フィルタロジック (既存維持)
   const stats = useMemo(() => {
     const res = { regions: {}, prefs: {}, subAreas: {}, total: data.length };
     data.filter(Boolean).forEach(item => {
@@ -353,7 +389,6 @@ const GourmetApp = () => {
     return res;
   }, [data, selectedPrefecture]);
 
-  // フィルタ済みデータ用メモ
   const filteredData = useMemo(() => {
     let res = data.filter(Boolean);
     if (activeTab === 'favorites') res = res.filter(item => item.isFavorite);
@@ -365,7 +400,6 @@ const GourmetApp = () => {
     return res;
   }, [data, searchTerm, selectedPrefecture, activeTab]);
 
-  // グループ化データ用メモ
   const groupedData = useMemo(() => {
     const groups = {};
     filteredData.forEach(i => {
@@ -376,7 +410,7 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
-  // データ同期ロジック
+  // データ同期ロジック (既存維持)
   useEffect(() => {
     if (!user || user.uid.startsWith('local-user')) { loadLocalData(); return; }
     let unsubSnapshot = null;
@@ -454,20 +488,6 @@ const GourmetApp = () => {
     }
   };
 
-  const copyDebugData = () => {
-    const debugText = JSON.stringify({
-      version: VERSION,
-      href: window.location.href,
-      ls: lsStatus,
-      cloud: { canUseCloud, cloudMode, appId },
-      user: user ? { uid: user.uid } : null,
-      timeline: logs
-    }, null, 2);
-    const el = document.createElement('textarea'); el.value = debugText; document.body.appendChild(el); el.select();
-    document.execCommand('copy'); document.body.removeChild(el);
-    alert("Debug Log Copied!");
-  };
-
   if (!authChecked || !libLoaded) {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
@@ -481,7 +501,7 @@ const GourmetApp = () => {
   const DebugPanel = () => (
     <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[10px] text-slate-300 font-mono transition-transform border-t sm:border-l border-white/20 shadow-2xl overflow-hidden flex flex-col ${isDebugOpen ? 'translate-y-0 h-[80vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
       <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shrink-0" onClick={() => setIsDebugOpen(!isDebugOpen)}>
-        <span className="font-bold text-orange-500 flex items-center gap-2"><Bug size={12}/> DIAGNOSTIC SYSTEM</span>
+        <span className="font-bold text-orange-500 flex items-center gap-2"><Bug size={12}/> DIAGNOSTIC SYSTEM ({VERSION})</span>
         {isDebugOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
@@ -489,19 +509,28 @@ const GourmetApp = () => {
           <div className="flex justify-between"><span>Cookies:</span><span>{String(envStatus.cookies)}</span></div>
           <div className="flex justify-between"><span>LocalStorage:</span><span className={envStatus.ls ? "text-green-500":"text-rose-500"}>{envStatus.ls?"OK":"FAIL"}</span></div>
           <div className="flex justify-between"><span>IndexedDB:</span><span className={envStatus.idb ? "text-green-500":"text-rose-500"}>{envStatus.idb?"OK":"FAIL"}</span></div>
+          <div className="flex justify-between"><span>Attempted:</span><span className={loginAttempted ? "text-orange-500":"text-slate-500"}>{String(loginAttempted)}</span></div>
         </div>
-        {redirectLog.status === 'no_result' && !user && (
+
+        {/* 診断アドバイスの改善 */}
+        {redirectLog.status === 'no_result' && loginAttempted && !user && (
           <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-200">
-            <p className="font-bold underline mb-1 italic">Check Authorized Domains</p>
-            <p>リダイレクト結果がありません。ドメイン <b>{window.location.hostname}</b> を許可設定してください。</p>
+            <p className="font-bold underline mb-1 italic">Authorized Domains 確認推奨</p>
+            <p className="text-[9px]">リダイレクト結果がありません。ログイン後にこの表示が出る場合は、Firebase Consoleで <b>{window.location.hostname}</b> が許可されているか確認してください。</p>
           </div>
         )}
+
         <div className="grid grid-cols-2 gap-2">
-          <button onClick={forceReloadNoCache} className="py-2 bg-slate-700 rounded font-bold flex items-center justify-center gap-1"><RotateCcw size={10}/> Reload</button>
-          <button onClick={hardSignOut} className="py-2 bg-rose-900/60 rounded font-bold flex items-center justify-center gap-1 text-rose-200"><Trash size={10}/> SignOut</button>
+          <button onClick={forceReloadNoCache} className="py-2 bg-slate-700 rounded font-bold flex items-center justify-center gap-1"><RotateCcw size={10}/> Force Reload</button>
+          <button onClick={hardSignOut} className="py-2 bg-rose-900/60 rounded font-bold flex items-center justify-center gap-1 text-rose-200"><Trash size={10}/> Hard SignOut</button>
         </div>
+
         <div className="space-y-1">
-          <div className="flex justify-between items-center"><p className="text-slate-500 uppercase tracking-widest">Auth Timeline</p><button onClick={copyDebugData} className="text-orange-500 text-[8px] hover:underline">COPY ALL</button></div>
+          <div className="flex justify-between items-center"><p className="text-slate-500 uppercase tracking-widest">Auth Timeline</p><button onClick={() => {
+             const text = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n");
+             const el = document.createElement('textarea'); el.value = text; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
+             alert("Logs Copied!");
+          }} className="text-orange-500 text-[8px] hover:underline">COPY ALL</button></div>
           <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-64 overflow-y-auto scrollbar-hide text-[9px]">
             {logs.map((log, i) => (
               <div key={i} className="flex gap-2 items-start border-b border-white/5 pb-1 last:border-0">
@@ -524,6 +553,7 @@ const GourmetApp = () => {
           <div className="animate-in fade-in duration-700 max-w-sm">
             <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl mb-8 inline-block"><Store size={40} /></div>
             <h2 className="text-3xl font-black text-slate-800 mb-2 uppercase italic tracking-tighter">Gourmet Master</h2>
+            <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストを同期しましょう。</p>
             {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold border border-rose-100 flex items-center gap-2 text-left"><ShieldAlert className="shrink-0" size={16}/> {authError}</div>}
             <button onClick={startLogin} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black shadow-2xl hover:bg-slate-800 active:scale-95 transition-all flex items-center justify-center gap-3 text-lg"><Cloud size={24} /> Googleでログイン</button>
             <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user-manual'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase">ログインせずに開始</button>
