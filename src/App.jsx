@@ -5,7 +5,7 @@ import {
   Loader2, Map as MapIcon, Grid, Database, 
   ChevronRight, Layers, ArrowDown, 
   Cloud, Copy, RefreshCcw, ShieldAlert, List,
-  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash, Link as LinkIcon, Terminal, Activity, Wifi, WifiOff
+  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash, Link as LinkIcon, Terminal, Activity, Wifi, WifiOff, AlertTriangle
 } from 'lucide-react';
 
 // Firebase SDK
@@ -23,8 +23,8 @@ import {
   browserLocalPersistence
 } from 'firebase/auth';
 
-// ★ バージョン定義 (Gen_ プレフィックス)
-const VERSION = "Gen_v3.80-RELIABLE-AUTO-CLOUD";
+// ★ バージョン定義
+const VERSION = "Gen_v3.81-CORE-SYNC-FIX";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -34,12 +34,12 @@ class ErrorBoundary extends Component {
     if (this.state.hasError) {
       return (
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center">
-          <ShieldAlert size={64} className="text-rose-500 mb-6 animate-pulse" />
-          <h1 className="text-2xl font-black uppercase tracking-tighter mb-2">System Load Error</h1>
-          <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8 text-left">
-            <p className="text-rose-400 font-bold text-sm break-all">{this.state.error?.message || "Failed to initialize the application."}</p>
+          <ShieldAlert size={64} className="text-rose-500 mb-6" />
+          <h1 className="text-2xl font-black uppercase mb-2">Core Crash Detected</h1>
+          <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8 text-left overflow-auto">
+            <p className="text-rose-400 font-bold text-sm">{this.state.error?.message}</p>
           </div>
-          <button onClick={() => window.location.reload()} className="px-10 py-4 bg-white text-slate-900 rounded-2xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload App</button>
+          <button onClick={() => window.location.reload()} className="px-10 py-4 bg-white text-black rounded-2xl font-black uppercase">Force Restart</button>
         </div>
       );
     }
@@ -63,20 +63,6 @@ const getSubArea = (pref, address = "") => {
   return match ? match[1].replace(pref, "") : "主要";
 };
 
-// --- 1. Firebase 初期化 (安全なグローバル定義) ---
-let firebaseApp, auth, db, appId;
-try {
-  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-  if (firebaseConfig.apiKey) {
-    firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-    auth = getAuth(firebaseApp);
-    db = getFirestore(firebaseApp);
-  }
-  appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
-} catch (e) {
-  console.error("Firebase Initialization Error:", e);
-}
-
 // --- B. アプリケーション本体 ---
 const GourmetApp = () => {
   const [data, setData] = useState([]);
@@ -88,8 +74,11 @@ const GourmetApp = () => {
   const [logs, setLogs] = useState([]);
   const [libLoaded, setLibLoaded] = useState(false);
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
+  const [firebaseStatus, setFirebaseStatus] = useState('INITIALIZING');
 
-  // パフォーマンス改善: 入力ラグ防止
+  // Firebase 関連のインスタンス（動的保持）
+  const [instances, setInstances] = useState({ auth: null, db: null, appId: 'gourmet-master-v1' });
+
   const [searchTermInput, setSearchTermInput] = useState('');
   const searchTerm = useDeferredValue(searchTermInput);
 
@@ -98,153 +87,163 @@ const GourmetApp = () => {
     setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 30));
   };
 
-  // --- 認証プロトコル (リトライ機能付き) ---
+  // --- Step 1: Firebase インスタンスの動的確立 ---
   useEffect(() => {
-    if (!auth) {
+    try {
+      addLog("BOOT_INIT", "Checking config...");
+      let config = null;
+      if (typeof __firebase_config !== 'undefined') {
+        config = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+      }
+
+      if (!config || !config.apiKey) {
+        setFirebaseStatus('CONFIG_MISSING');
+        addLog("BOOT_ERROR", "Configuration data is empty.");
+        setAuthChecked(true); // オフラインとして起動
+        return;
+      }
+
+      const app = getApps().length === 0 ? initializeApp(config) : getApps()[0];
+      const _auth = getAuth(app);
+      const _db = getFirestore(app);
+      const _appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
+
+      setInstances({ auth: _auth, db: _db, appId: _appId });
+      setFirebaseStatus('READY');
+      addLog("BOOT_SUCCESS", "Firebase Engine Ready");
+    } catch (e) {
+      setFirebaseStatus('CRASH');
+      addLog("BOOT_CRASH", e.message);
       setAuthChecked(true);
-      addLog("FIREBASE_MISSING", "Check __firebase_config");
-      return;
     }
+  }, [reconnectTrigger]);
 
-    let retryCount = 0;
-    const maxRetries = 10;
+  // --- Step 2: 認証シーケンス (Rule 3) ---
+  useEffect(() => {
+    if (firebaseStatus !== 'READY' || !instances.auth) return;
 
-    const initAuth = async () => {
+    const runAuth = async () => {
       try {
-        addLog("AUTH_ATTEMPT", `Attempt ${retryCount + 1}`);
-        await setPersistence(auth, browserLocalPersistence);
+        addLog("AUTH_ATTEMPT", "Signing in...");
+        await setPersistence(instances.auth, browserLocalPersistence);
+        
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
+          await signInWithCustomToken(instances.auth, __initial_auth_token);
         } else {
-          await signInAnonymously(auth);
+          await signInAnonymously(instances.auth);
         }
       } catch (e) {
-        addLog("AUTH_ERROR", e.code);
-        if (retryCount < maxRetries) {
-          retryCount++;
-          setTimeout(initAuth, 3000); // 3秒後に再試行
-        } else {
-          setAuthChecked(true);
-        }
+        addLog("AUTH_FAIL", e.code);
+        // 失敗しても 5秒後にリトライ（WindowsでOfflineにならないためのキモ）
+        setTimeout(() => setReconnectTrigger(t => t + 1), 5000);
       }
     };
 
-    initAuth();
+    runAuth();
 
-    const unsub = onAuthStateChanged(auth, (u) => {
+    const unsub = onAuthStateChanged(instances.auth, (u) => {
       if (u) {
         setUser(u);
         setAuthChecked(true);
-        addLog("AUTH_SUCCESS", u.uid.slice(0, 8));
+        addLog("AUTH_OK", u.uid.slice(0, 8));
       } else {
-        addLog("AUTH_WAITING", "Waiting for valid session...");
+        addLog("AUTH_LOST", "Session disconnected");
       }
     });
 
     return () => unsub();
-  }, [reconnectTrigger]);
+  }, [firebaseStatus, reconnectTrigger, instances.auth]);
 
-  // --- 同期プロトコル (Rule 1 & Rule 3) ---
+  // --- Step 3: 同期シーケンス (Rule 1 & Rule 3) ---
   useEffect(() => {
-    if (!user || !db) return;
+    if (!user || !instances.db) return;
 
     setIsSyncing(true);
-    addLog("SYNC_SUBSCRIBING", "Opening public channel...");
+    addLog("SYNC_START", "Connecting to Cloud storage...");
     
-    // 正確なパス: /artifacts/{appId}/public/data/stores
-    const storesCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stores');
+    // パス固定: /artifacts/{appId}/public/data/stores
+    const storesCollection = collection(instances.db, 'artifacts', instances.appId, 'public', 'data', 'stores');
     
     const unsub = onSnapshot(storesCollection, (snap) => {
       const stores = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setData(stores);
       setIsSyncing(false);
-      addLog("SYNC_COMPLETE", `${stores.length} items found`);
+      addLog("SYNC_SUCCESS", `${stores.length} items loaded`);
     }, (err) => { 
       setIsSyncing(false);
-      addLog("SYNC_PERM_ERROR", err.code);
-      // 権限エラー時は5秒後に自動再試行
-      setTimeout(() => setReconnectTrigger(t => t + 1), 5000);
+      addLog("SYNC_ERROR", err.code);
+      if (err.code === 'permission-denied') {
+        addLog("CRITICAL", "Path rules violation or auth expired.");
+      }
     });
 
     return () => unsub();
-  }, [user, reconnectTrigger]);
+  }, [user, instances.db, instances.appId, reconnectTrigger]);
 
   const saveDataToCloud = async (storesToSave) => {
-    if (!user || !db) { 
-      alert("クラウドに接続されていません（Offline）。数秒待って再試行してください。"); 
-      return; 
+    if (!user || !instances.db) {
+      alert("クラウド接続待ちです。しばらく待ってから再実行してください。");
+      return;
     }
     const safeStores = Array.isArray(storesToSave) ? storesToSave.filter(Boolean) : [];
     setIsSyncing(true);
-    addLog("UPLOAD_START", safeStores.length);
-    
     try {
-      const batch = writeBatch(db);
+      const batch = writeBatch(instances.db);
       safeStores.forEach(s => {
         const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'stores', docId);
+        const docRef = doc(instances.db, 'artifacts', instances.appId, 'public', 'data', 'stores', docId);
         batch.set(docRef, { ...s, id: docId }, { merge: true });
       });
       await batch.commit();
-      addLog("UPLOAD_OK");
-    } catch (e) { 
-      addLog("UPLOAD_FAIL", e.code); 
-      alert("保存できませんでした: " + e.code);
-    }
+      addLog("UPLOAD_OK", safeStores.length);
+    } catch (e) { addLog("UPLOAD_FAIL", e.code); }
     setIsSyncing(false);
   };
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file) return;
-    if (!window.XLSX) {
-      alert("解析ライブラリを読み込み中です。もう一度試してください。");
+    if (!file || !window.XLSX) {
+      alert("準備中です。もう一度選んでください。");
       return;
     }
-    addLog("FILE_INPUT", file.name);
+    addLog("FILE_IN", file.name);
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
         const workbook = window.XLSX.read(e.target.result, { type: 'array' });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonData = window.XLSX.utils.sheet_to_json(sheet);
-        
+        const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
         const normalized = jsonData.map((item, index) => {
-          const name = item.店舗名 || item['店舗名'] || item['店名'] || '名称不明';
+          const name = item.店舗名 || item['店舗名'] || item['店名'] || '店舗名不明';
           const addr = item.住所 || item['住所'] || '';
           const pref = item.都道府県 || item['都道府県'] || 'その他';
-          const itemId = `${name}-${addr}-${Date.now()}-${index}`.replace(/[.#$/[\]]/g, "_");
+          const itemId = `${name}-${addr}-${index}`.replace(/[.#$/[\]]/g, "_");
           return {
             id: itemId, NO: item.NO || (data.length + index + 1), 店舗名: name,
             カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店', 都道府県: pref, 住所: addr,
             URL: item.URL || item['URL'] || '', imageURL: item.imageURL || item['imageURL'] || '', isFavorite: false
           };
         });
-        
         setData(normalized);
         setActiveTab('list');
         await saveDataToCloud(normalized);
-      } catch (err) { 
-        addLog("PARSE_ERR", err.message);
-        alert("エクセルの読み込みに失敗しました。");
-      }
+      } catch (err) { addLog("PARSE_ERR", err.message); }
     };
     reader.readAsArrayBuffer(file);
     event.target.value = '';
   };
 
   const deleteData = async (id) => {
-    if (!user || !db || !window.confirm("削除しますか？")) return;
+    if (!user || !window.confirm("削除しますか？")) return;
     try { 
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stores', id));
+      await deleteDoc(doc(instances.db, 'artifacts', instances.appId, 'public', 'data', 'stores', id));
       addLog("DELETE_OK"); 
     } catch(e) { addLog("DELETE_FAIL", e.code); }
   };
 
   const toggleFavorite = async (store) => {
-    if (!user || !db) return;
+    if (!user) return;
     try {
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stores', store.id), { isFavorite: !store.isFavorite }, { merge: true });
+      await setDoc(doc(instances.db, 'artifacts', instances.appId, 'public', 'data', 'stores', store.id), { isFavorite: !store.isFavorite }, { merge: true });
     } catch(e) { addLog("FAV_ERR", e.code); }
   };
 
@@ -253,9 +252,7 @@ const GourmetApp = () => {
     if (activeTab === 'favorites') res = res.filter(d => d.isFavorite);
     if (searchTerm) {
       const t = searchTerm.toLowerCase();
-      res = res.filter(d => (
-        (d.店舗名?.toLowerCase().includes(t) || d.住所?.toLowerCase().includes(t) || d.カテゴリ?.toLowerCase().includes(t))
-      ));
+      res = res.filter(d => (d.店舗名?.toLowerCase().includes(t) || d.住所?.toLowerCase().includes(t) || d.カテゴリ?.toLowerCase().includes(t)));
     }
     if (selectedPrefecture !== 'すべて') res = res.filter(d => d.都道府県 === selectedPrefecture);
     return res;
@@ -271,12 +268,11 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
-  // ライブラリ動的ロード
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => { setLibLoaded(true); addLog("XLSX_LOADED"); };
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_READY"); };
     document.head.appendChild(script);
   }, []);
 
@@ -284,14 +280,13 @@ const GourmetApp = () => {
     return <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-10 text-center">
       <Loader2 className="animate-spin text-orange-500 w-16 h-16 mb-6 mx-auto" />
       <h2 className="text-4xl font-black text-white tracking-tighter mb-2">{VERSION}</h2>
-      <p className="font-bold text-slate-500 uppercase tracking-widest text-xs animate-pulse">Establishing Secure Cloud Session...</p>
+      <p className="font-bold text-slate-500 uppercase tracking-widest text-xs animate-pulse">Initializing Firebase Engine...</p>
     </div>;
   }
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-24 sm:pb-0 relative overflow-x-hidden">
       
-      {/* ヘッダー */}
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-2 shadow-sm">
         <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={22} /></div>
@@ -300,13 +295,7 @@ const GourmetApp = () => {
         
         <div className="flex-1 relative group">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-          <input 
-            type="text" 
-            placeholder="店名や住所で検索..." 
-            className="w-full pl-10 pr-3 py-2.5 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" 
-            value={searchTermInput} 
-            onChange={(e) => setSearchTermInput(e.target.value)} 
-          />
+          <input type="text" placeholder="店名や住所で高速検索..." className="w-full pl-10 pr-3 py-2.5 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTermInput} onChange={(e) => setSearchTermInput(e.target.value)} />
         </div>
         
         {/* 同期バッジ */}
@@ -333,49 +322,56 @@ const GourmetApp = () => {
       <main className="max-w-7xl mx-auto p-6 md:p-10 min-h-screen">
         <div className="mb-12 text-center animate-in fade-in duration-1000">
            <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-6">{VERSION}</h2>
-           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-rose-500 text-white animate-bounce'}`}>
-             {user ? 'Cloud Synchronized' : 'Offline: Trying to Connect...'}
+           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-rose-500 text-white'}`}>
+             {user ? 'Global Public Sync Enabled' : 'Connecting to Core Hub...'}
            </div>
         </div>
 
-        {/* ネットワークモニター */}
+        {/* ネットワーク診断モニター */}
         <div className="max-w-4xl mx-auto mb-16 bg-slate-900 rounded-[2.5rem] overflow-hidden shadow-2xl border border-slate-800">
-          <div className="bg-slate-800 px-8 py-5 flex items-center justify-between">
+          <div className="bg-slate-800 px-8 py-5 flex items-center justify-between border-b border-white/5">
             <div className="flex items-center gap-3">
               <Activity className="text-orange-500 animate-pulse" size={20} />
-              <span className="text-[10px] font-black text-white uppercase tracking-widest italic">Secure Link Monitor</span>
+              <span className="text-[10px] font-black text-white uppercase tracking-widest italic">Core Network Monitor</span>
             </div>
-            <button onClick={() => setReconnectTrigger(t => t + 1)} className="px-6 py-2 bg-slate-700 hover:bg-slate-600 rounded-full transition-all active:scale-95 shadow-lg">
+            <button onClick={() => setReconnectTrigger(t => t + 1)} className="px-6 py-2 bg-slate-700 hover:bg-slate-600 rounded-full transition-all active:scale-95 shadow-lg border border-white/5">
                <RotateCcw size={14} className="text-orange-400 inline mr-2" />
-               <span className="text-[10px] text-white font-black uppercase">Retry Connection</span>
+               <span className="text-[10px] text-white font-black uppercase">Retry Auth</span>
             </button>
           </div>
-          <div className="p-8 grid grid-cols-2 sm:grid-cols-4 gap-4 text-[9px] font-black uppercase tracking-tighter text-center">
-            <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
-              <p className="text-slate-500 mb-1">Auth Session</p>
-              <p className={user ? "text-green-500 font-bold" : "text-rose-500 animate-pulse"}>{user ? "CONNECTED" : "WAITING..."}</p>
+          <div className="p-8 space-y-6">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-[9px] font-black uppercase tracking-tighter text-center">
+              <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
+                <p className="text-slate-500 mb-1">Session ID</p>
+                <p className={user ? "text-blue-400 truncate" : "text-rose-500"}>{user ? user.uid.slice(0,10) : 'DISCONNECTED'}</p>
+              </div>
+              <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
+                <p className="text-slate-500 mb-1">Local Stores</p>
+                <p className="text-green-400 text-xl">{data.length}</p>
+              </div>
+              <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
+                <p className="text-slate-500 mb-1">Engine Status</p>
+                <p className={firebaseStatus === 'READY' ? 'text-green-400' : 'text-rose-500'}>{firebaseStatus}</p>
+              </div>
+              <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
+                <p className="text-slate-500 mb-1">Sync Access</p>
+                <p className={user ? "text-green-500 font-bold" : "text-rose-500 font-bold"}>{user ? "CONNECTED" : "OFFLINE"}</p>
+              </div>
             </div>
-            <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
-              <p className="text-slate-500 mb-1">Cloud Dataset</p>
-              <p className="text-green-400 text-xl">{data.length}</p>
-            </div>
-            <div className="bg-black/40 p-5 rounded-2xl border border-white/5 col-span-2 h-24 overflow-y-auto scrollbar-hide text-left">
-               {logs.map((l, i) => ( <div key={i} className={`flex gap-3 mb-1 border-b border-white/5 pb-1 ${l.event.includes('ERR') ? 'text-rose-400 font-bold' : 'text-slate-400'}`}><span className="text-slate-600">{l.time}</span><span className="text-orange-500 font-black">{l.event}</span><span>{l.value}</span></div> ))}
+            <div className="bg-black/40 rounded-3xl p-6 h-32 overflow-y-auto scrollbar-hide font-mono text-[10px] border border-white/5 text-slate-300">
+               {logs.length === 0 ? <p className="opacity-30">No logs yet...</p> : logs.map((l, i) => ( <div key={i} className={`flex gap-3 mb-1 border-b border-white/5 pb-1 ${l.event.includes('ERR') ? 'text-rose-400 font-bold' : 'text-slate-400'}`}><span className="text-slate-600">{l.time}</span><span className="text-orange-500 font-black">{l.event}</span><span>{l.value}</span></div> ))}
             </div>
           </div>
         </div>
 
         {data.length === 0 ? (
-          <div className="max-w-4xl mx-auto py-24 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
+          <div className="max-w-4xl mx-auto py-20 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={100} />
-              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase leading-none">Import Data</h2>
-              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">
-                Windowsでエクセルを取り込むと、全端末で自動同期されます。<br/>
-                「Offline」の場合は数秒お待ちください。
-              </p>
+              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Import Required</h2>
+              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">Windowsでエクセルを取り込めばiPhoneにも自動表示されます。<br/>「Offline」の場合は、上のモニターのRetryを押してください。</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-lg mx-auto">
-                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl italic tracking-widest uppercase">Sample</button>
-                <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase shadow-sm">
+                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl tracking-widest">Sample</button>
+                <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase">
                   <Upload size={24}/> Import Excel<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
                 </label>
               </div>
@@ -440,7 +436,6 @@ const GourmetApp = () => {
         VER {VERSION} | ALL TERMINALS SYNCED
       </footer>
 
-      {/* モバイル用インポートボタン */}
       <div className="fixed bottom-10 left-1/2 -translate-x-1/2 sm:hidden z-40 flex items-center gap-4">
         <label className="bg-slate-900 text-white px-8 py-5 rounded-[2rem] font-black shadow-2xl active:scale-110 transition-all flex items-center gap-3 text-sm uppercase tracking-widest shadow-slate-400">
            <Upload size={20}/> Import Excel
