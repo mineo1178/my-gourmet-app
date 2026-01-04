@@ -24,7 +24,7 @@ import {
 } from 'firebase/auth';
 
 // ★ バージョン定義 (Gen_ プレフィックス)
-const VERSION = "Gen_v3.79-ULTIMATE-SYNC";
+const VERSION = "Gen_v3.80-RELIABLE-AUTO-CLOUD";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -36,7 +36,7 @@ class ErrorBoundary extends Component {
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center">
           <ShieldAlert size={64} className="text-rose-500 mb-6 animate-pulse" />
           <h1 className="text-2xl font-black uppercase tracking-tighter mb-2">System Load Error</h1>
-          <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8">
+          <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8 text-left">
             <p className="text-rose-400 font-bold text-sm break-all">{this.state.error?.message || "Failed to initialize the application."}</p>
           </div>
           <button onClick={() => window.location.reload()} className="px-10 py-4 bg-white text-slate-900 rounded-2xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload App</button>
@@ -98,17 +98,20 @@ const GourmetApp = () => {
     setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 30));
   };
 
-  // --- 認証プロトコル (Rule 3) ---
+  // --- 認証プロトコル (リトライ機能付き) ---
   useEffect(() => {
     if (!auth) {
       setAuthChecked(true);
-      addLog("FIREBASE_MISSING", "Offline mode active");
+      addLog("FIREBASE_MISSING", "Check __firebase_config");
       return;
     }
 
+    let retryCount = 0;
+    const maxRetries = 10;
+
     const initAuth = async () => {
       try {
-        addLog("AUTH_START");
+        addLog("AUTH_ATTEMPT", `Attempt ${retryCount + 1}`);
         await setPersistence(auth, browserLocalPersistence);
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
@@ -117,20 +120,27 @@ const GourmetApp = () => {
         }
       } catch (e) {
         addLog("AUTH_ERROR", e.code);
-        setAuthChecked(true);
+        if (retryCount < maxRetries) {
+          retryCount++;
+          setTimeout(initAuth, 3000); // 3秒後に再試行
+        } else {
+          setAuthChecked(true);
+        }
       }
     };
 
     initAuth();
+
     const unsub = onAuthStateChanged(auth, (u) => {
       if (u) {
         setUser(u);
         setAuthChecked(true);
-        addLog("AUTH_READY", u.uid.slice(0, 8));
+        addLog("AUTH_SUCCESS", u.uid.slice(0, 8));
       } else {
-        addLog("AUTH_WAITING");
+        addLog("AUTH_WAITING", "Waiting for valid session...");
       }
     });
+
     return () => unsub();
   }, [reconnectTrigger]);
 
@@ -139,7 +149,7 @@ const GourmetApp = () => {
     if (!user || !db) return;
 
     setIsSyncing(true);
-    addLog("SYNC_SUBSCRIBING");
+    addLog("SYNC_SUBSCRIBING", "Opening public channel...");
     
     // 正確なパス: /artifacts/{appId}/public/data/stores
     const storesCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stores');
@@ -148,18 +158,22 @@ const GourmetApp = () => {
       const stores = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setData(stores);
       setIsSyncing(false);
-      addLog("SYNC_DATA", `${stores.length} items`);
+      addLog("SYNC_COMPLETE", `${stores.length} items found`);
     }, (err) => { 
       setIsSyncing(false);
       addLog("SYNC_PERM_ERROR", err.code);
-      console.error("Firestore Error:", err);
+      // 権限エラー時は5秒後に自動再試行
+      setTimeout(() => setReconnectTrigger(t => t + 1), 5000);
     });
 
     return () => unsub();
   }, [user, reconnectTrigger]);
 
   const saveDataToCloud = async (storesToSave) => {
-    if (!user || !db) { alert("現在オフラインです。"); return; }
+    if (!user || !db) { 
+      alert("クラウドに接続されていません（Offline）。数秒待って再試行してください。"); 
+      return; 
+    }
     const safeStores = Array.isArray(storesToSave) ? storesToSave.filter(Boolean) : [];
     setIsSyncing(true);
     addLog("UPLOAD_START", safeStores.length);
@@ -175,15 +189,19 @@ const GourmetApp = () => {
       addLog("UPLOAD_OK");
     } catch (e) { 
       addLog("UPLOAD_FAIL", e.code); 
-      alert("保存エラー: " + e.code);
+      alert("保存できませんでした: " + e.code);
     }
     setIsSyncing(false);
   };
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file || !window.XLSX) return;
-    addLog("FILE_READ", file.name);
+    if (!file) return;
+    if (!window.XLSX) {
+      alert("解析ライブラリを読み込み中です。もう一度試してください。");
+      return;
+    }
+    addLog("FILE_INPUT", file.name);
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
@@ -192,7 +210,7 @@ const GourmetApp = () => {
         const jsonData = window.XLSX.utils.sheet_to_json(sheet);
         
         const normalized = jsonData.map((item, index) => {
-          const name = item.店舗名 || item['店舗名'] || item['店名'] || '店舗名不明';
+          const name = item.店舗名 || item['店舗名'] || item['店名'] || '名称不明';
           const addr = item.住所 || item['住所'] || '';
           const pref = item.都道府県 || item['都道府県'] || 'その他';
           const itemId = `${name}-${addr}-${Date.now()}-${index}`.replace(/[.#$/[\]]/g, "_");
@@ -207,8 +225,8 @@ const GourmetApp = () => {
         setActiveTab('list');
         await saveDataToCloud(normalized);
       } catch (err) { 
-        alert("エクセル解析に失敗しました。");
         addLog("PARSE_ERR", err.message);
+        alert("エクセルの読み込みに失敗しました。");
       }
     };
     reader.readAsArrayBuffer(file);
@@ -258,7 +276,7 @@ const GourmetApp = () => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => { setLibLoaded(true); addLog("LIB_READY"); };
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_LOADED"); };
     document.head.appendChild(script);
   }, []);
 
@@ -266,14 +284,14 @@ const GourmetApp = () => {
     return <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-10 text-center">
       <Loader2 className="animate-spin text-orange-500 w-16 h-16 mb-6 mx-auto" />
       <h2 className="text-4xl font-black text-white tracking-tighter mb-2">{VERSION}</h2>
-      <p className="font-bold text-slate-500 uppercase tracking-widest text-xs">Authenticating with Secure Hub...</p>
+      <p className="font-bold text-slate-500 uppercase tracking-widest text-xs animate-pulse">Establishing Secure Cloud Session...</p>
     </div>;
   }
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-24 sm:pb-0 relative overflow-x-hidden">
       
-      {/* ヘッダー: iPhone最適化 */}
+      {/* ヘッダー */}
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-2 shadow-sm">
         <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={22} /></div>
@@ -291,16 +309,16 @@ const GourmetApp = () => {
           />
         </div>
         
-        {/* 同期バッジ: コンパクト化 */}
+        {/* 同期バッジ */}
         <div className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border shadow-inner shrink-0 ${user ? 'bg-orange-50 border-orange-200' : 'bg-rose-50 border-rose-200'}`}>
-          {user ? <Wifi size={14} className="text-orange-500" /> : <WifiOff size={14} className="text-rose-500" />}
+          {user ? <Wifi size={14} className="text-orange-500" /> : <WifiOff size={14} className="text-rose-500 animate-pulse" />}
           <span className={`text-[10px] font-black uppercase ${user ? 'text-orange-700' : 'text-rose-700'}`}>
-            {user ? 'Cloud' : 'Offline'}
+            {user ? 'Cloud' : 'Wait...'}
           </span>
         </div>
 
         <div className="hidden sm:flex items-center gap-2">
-           <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 shadow-lg">
+           <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 transition-all shadow-lg">
              <Upload size={22} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
            </label>
         </div>
@@ -315,30 +333,30 @@ const GourmetApp = () => {
       <main className="max-w-7xl mx-auto p-6 md:p-10 min-h-screen">
         <div className="mb-12 text-center animate-in fade-in duration-1000">
            <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-6">{VERSION}</h2>
-           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-rose-500 text-white'}`}>
-             {user ? 'Real-time Synchronized' : 'Offline Mode: Data not shared'}
+           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-rose-500 text-white animate-bounce'}`}>
+             {user ? 'Cloud Synchronized' : 'Offline: Trying to Connect...'}
            </div>
         </div>
 
-        {/* ネットワークモニター (不具合解決のための詳細ログ) */}
+        {/* ネットワークモニター */}
         <div className="max-w-4xl mx-auto mb-16 bg-slate-900 rounded-[2.5rem] overflow-hidden shadow-2xl border border-slate-800">
           <div className="bg-slate-800 px-8 py-5 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Activity className="text-orange-500 animate-pulse" size={20} />
-              <span className="text-[10px] font-black text-white uppercase tracking-widest italic">Global Sync Monitor</span>
+              <span className="text-[10px] font-black text-white uppercase tracking-widest italic">Secure Link Monitor</span>
             </div>
             <button onClick={() => setReconnectTrigger(t => t + 1)} className="px-6 py-2 bg-slate-700 hover:bg-slate-600 rounded-full transition-all active:scale-95 shadow-lg">
                <RotateCcw size={14} className="text-orange-400 inline mr-2" />
-               <span className="text-[10px] text-white font-black uppercase">Force Reconnect</span>
+               <span className="text-[10px] text-white font-black uppercase">Retry Connection</span>
             </button>
           </div>
           <div className="p-8 grid grid-cols-2 sm:grid-cols-4 gap-4 text-[9px] font-black uppercase tracking-tighter text-center">
             <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
-              <p className="text-slate-500 mb-1">Session Status</p>
-              <p className={user ? "text-green-500 font-bold" : "text-rose-500 animate-pulse"}>{user ? "CONNECTED" : "OFFLINE"}</p>
+              <p className="text-slate-500 mb-1">Auth Session</p>
+              <p className={user ? "text-green-500 font-bold" : "text-rose-500 animate-pulse"}>{user ? "CONNECTED" : "WAITING..."}</p>
             </div>
             <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5 shadow-inner">
-              <p className="text-slate-500 mb-1">Database Items</p>
+              <p className="text-slate-500 mb-1">Cloud Dataset</p>
               <p className="text-green-400 text-xl">{data.length}</p>
             </div>
             <div className="bg-black/40 p-5 rounded-2xl border border-white/5 col-span-2 h-24 overflow-y-auto scrollbar-hide text-left">
@@ -350,13 +368,13 @@ const GourmetApp = () => {
         {data.length === 0 ? (
           <div className="max-w-4xl mx-auto py-24 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={100} />
-              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase leading-none">Database Empty</h2>
+              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase leading-none">Import Data</h2>
               <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">
-                Windowsでエクセルを取り込んでください。<br/>
-                取り込んだデータはこのiPhoneに自動で表示されます。
+                Windowsでエクセルを取り込むと、全端末で自動同期されます。<br/>
+                「Offline」の場合は数秒お待ちください。
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-lg mx-auto">
-                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl tracking-widest uppercase">Sample Create</button>
+                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl italic tracking-widest uppercase">Sample</button>
                 <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase shadow-sm">
                   <Upload size={24}/> Import Excel<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
                 </label>
@@ -367,7 +385,7 @@ const GourmetApp = () => {
             {activeTab === 'map' ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 animate-in fade-in duration-700">
                 {Object.keys(regions).map(reg => (
-                  <button key={reg} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[3rem] p-10 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[220px] relative overflow-hidden active:scale-95 text-slate-800 text-slate-800">
+                  <button key={`region-${reg}`} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[3rem] p-10 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[220px] relative overflow-hidden active:scale-95 text-slate-800">
                     <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
                     <div className="relative z-10"><p className="text-[11px] font-black text-slate-300 uppercase tracking-[0.4em] mb-2">{reg} Area</p><h3 className="text-4xl font-black group-hover:text-orange-600 transition-colors uppercase tracking-tighter">{reg}</h3></div>
                     <div className="relative z-10 mt-8 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-400 px-4 py-2 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors uppercase">{data.filter(d => (regions[reg] || []).includes(d.都道府県)).length} STORES</span><ChevronRight size={28} className="text-orange-500 -translate-x-4 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
@@ -380,7 +398,7 @@ const GourmetApp = () => {
                    <div className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-xl sticky top-48 space-y-10 max-h-[70vh] overflow-y-auto scrollbar-hide font-black text-xs">
                     <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3 border-b border-slate-50 pb-6 italic tracking-widest"><ArrowDown size={18} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
-                      <button key={category} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-6 py-5 bg-slate-50 text-left rounded-[2rem] hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm uppercase tracking-widest text-slate-600">
+                      <button key={`side-${category}`} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-6 py-5 bg-slate-50 text-left rounded-[2rem] hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm uppercase tracking-widest text-slate-600">
                         <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-3 py-1 rounded-xl shadow-sm font-black text-[10px]">{stores.length}</span>
                       </button>
                     ))}
@@ -388,7 +406,7 @@ const GourmetApp = () => {
                 </aside>
                 <div className="flex-1 space-y-24 min-w-0">
                   {groupedData.map(([category, stores]) => (
-                    <div key={category} id={`category-section-${category}`} className="space-y-12 scroll-mt-48 animate-in fade-in duration-1000">
+                    <div key={`section-${category}`} id={`category-section-${category}`} className="space-y-12 scroll-mt-48 animate-in fade-in duration-1000">
                       <div className="flex items-center gap-8 px-4"><h3 className="text-3xl font-black text-slate-800 flex items-center gap-4 uppercase tracking-tighter italic"><Layers size={36} className="text-orange-500" /> {category}</h3><div className="flex-1 h-0.5 bg-slate-200/60"></div><span className="bg-orange-500 text-white px-8 py-2.5 rounded-full text-[11px] font-black shadow-lg tracking-[0.2em]">{stores.length} ITEMS</span></div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
                         {stores.map(store => (
