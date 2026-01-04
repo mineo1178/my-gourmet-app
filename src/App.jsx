@@ -5,7 +5,7 @@ import {
   Loader2, Map as MapIcon, Grid, Database, 
   ChevronRight, Layers, ArrowDown, 
   Cloud, Copy, RefreshCcw, ShieldAlert, List,
-  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown
+  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, Clock, Terminal, RotateCcw, Trash
 } from 'lucide-react';
 
 // Firebase SDK インポート
@@ -22,10 +22,11 @@ import {
   signInWithPopup,
   getRedirectResult,
   setPersistence,
-  browserLocalPersistence
+  browserLocalPersistence,
+  signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.37-DEBUG-SURGEON";
+const VERSION = "v3.39-AUTH-FIXED";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -43,20 +44,11 @@ class ErrorBoundary extends Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-slate-900 text-white p-8 font-mono overflow-auto flex flex-col items-center justify-center text-center">
-          <div className="max-w-3xl w-full space-y-6 bg-slate-800 p-10 rounded-[3rem] border border-white/10 shadow-2xl">
-            <ShieldAlert size={64} className="text-rose-500 mx-auto" />
-            <h1 className="text-2xl font-black italic uppercase tracking-tighter">System Crash Prevented</h1>
-            <div className="p-5 bg-black/50 rounded-2xl border border-white/5 text-left space-y-2 text-xs">
-              <p className="text-rose-400 font-bold">Error: {this.state.error?.message || "Render Error"}</p>
-              <div className="text-slate-500 border-t border-white/5 pt-2 mt-2">
-                VERSION: {VERSION} | HOST: {window.location.hostname}
-              </div>
-            </div>
-            <button onClick={() => window.location.reload()} className="w-full py-5 bg-orange-500 text-white rounded-3xl font-black flex items-center justify-center gap-3 hover:bg-orange-600 transition-all shadow-xl active:scale-95">
-              <RefreshCcw size={20} /> Reload Application
-            </button>
-          </div>
+        <div className="min-h-screen bg-slate-900 text-white p-8 font-mono overflow-auto flex flex-col items-center justify-center text-center text-xs">
+          <ShieldAlert size={48} className="text-rose-500 mx-auto mb-4" />
+          <h1 className="text-lg font-black uppercase">Critical Crash</h1>
+          <p className="mt-2 text-rose-400">{this.state.error?.message}</p>
+          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-bold">Reload</button>
         </div>
       );
     }
@@ -156,8 +148,6 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
-    // 初期化時の永続化設定（エラーは無視せずコンソールへ）
-    setPersistence(auth, browserLocalPersistence).catch(e => console.error("INIT_PERSISTENCE_ERR", e));
   } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
 }
 
@@ -165,7 +155,6 @@ const canUseCloud = Boolean(isEnvConfig && auth && db);
 
 const checkIsMobile = () => {
   if (typeof navigator === 'undefined') return false;
-  if (navigator.userAgentData?.mobile) return true;
   const ua = navigator.userAgent;
   const isIPadOS = (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua));
   return /iPhone|iPod|Android/i.test(ua) || isIPadOS;
@@ -185,10 +174,18 @@ const GourmetApp = () => {
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [isLocating, setIsLocating] = useState(false);
 
-  // デバッグ用パネルの状態
+  // Auth Timeline ログシステム
+  const [logs, setLogs] = useState([]);
+  const addLog = (event, value = "-") => {
+    const time = new Date().toLocaleTimeString([], { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+    const entry = { time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) };
+    setLogs(prev => [entry, ...prev].slice(0, 50));
+    console.log(`[${time}] ${event}:`, value);
+  };
+
   const [isDebugOpen, setIsDebugOpen] = useState(false);
-  const [redirectResultLog, setRedirectResultLog] = useState({ status: 'wait', time: '-' });
-  const [lastAuthEvent, setLastAuthEvent] = useState('-');
+  const [redirectLog, setRedirectLog] = useState({ status: 'wait', code: '-' });
+  const [envStatus, setEnvStatus] = useState({});
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
@@ -200,14 +197,28 @@ const GourmetApp = () => {
   const isMobileDevice = useMemo(() => checkIsMobile(), []);
   const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
-  // LocalStorage 書き込みチェック
-  const lsStatus = useMemo(() => {
+  // 環境判定
+  useEffect(() => {
+    const status = {
+      cookies: navigator.cookieEnabled,
+      secure: window.isSecureContext,
+      ls: false,
+      idb: false,
+    };
     try {
-      const key = `__ls_test_${Date.now()}`;
-      localStorage.setItem(key, "1");
-      localStorage.removeItem(key);
-      return "OK";
-    } catch(e) { return `FAIL (${e.name})`; }
+      localStorage.setItem("__test", "1");
+      localStorage.removeItem("__test");
+      status.ls = true;
+    } catch(e) {}
+    
+    try {
+      const req = indexedDB.open("__test_idb");
+      req.onsuccess = () => { status.idb = true; setEnvStatus({...status}); };
+      req.onerror = () => { status.idb = false; setEnvStatus({...status}); };
+    } catch(e) { status.idb = false; setEnvStatus({...status}); }
+    
+    setEnvStatus(status);
+    addLog("PAGE_LOAD", { href: window.location.href, ref: document.referrer, ua: navigator.userAgent });
   }, []);
 
   const scrollToCategory = (id) => {
@@ -216,6 +227,117 @@ const GourmetApp = () => {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.async = true;
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_LOADED"); };
+    script.onerror = () => { setLibLoaded(true); addLog("XLSX_FAILED"); }; 
+    document.head.appendChild(script);
+    setTimeout(() => { if(!window.XLSX) { setLibLoaded(true); addLog("XLSX_TIMEOUT"); } }, 4000);
+  }, []);
+
+  // 認証・リダイレクト詳細ログ
+  useEffect(() => {
+    let unsubAuth = null;
+    let isMounted = true;
+
+    if (cloudMode && canUseCloud) {
+      addLog("GET_REDIRECT_START");
+      getRedirectResult(auth)
+        .then((res) => { 
+          if (res?.user && isMounted) {
+            addLog("GET_REDIRECT_SUCCESS", { uid: res.user.uid, email: res.user.email });
+            setRedirectLog({ status: 'success', code: 'OK' });
+            setUser(res.user); 
+          } else {
+            addLog("GET_REDIRECT_NO_RESULT");
+            setRedirectLog({ status: 'no_result', code: '-' });
+          }
+        })
+        .catch((err) => {
+          if (isMounted) {
+            addLog("GET_REDIRECT_ERROR", { code: err.code, msg: err.message });
+            setRedirectLog({ status: 'error', code: err.code });
+            setAuthError(`Auth Error: ${err.code}`);
+            setNeedsLogin(true);
+            setAuthChecked(true);
+          }
+        });
+
+      unsubAuth = onAuthStateChanged(auth, (u) => { 
+        if (!isMounted) return;
+        addLog("AUTH_STATE_CHANGED", u ? { uid: u.uid, providers: u.providerData?.map(p => p.providerId) } : "null");
+        if (!u) { setNeedsLogin(true); setUser(null); } 
+        else { setNeedsLogin(false); setUser(u); }
+        setAuthChecked(true);
+      });
+
+      // 遅延チェック (Safariセッション復元漏れ対策)
+      [1000, 3000, 5000].forEach(ms => {
+        setTimeout(() => {
+          if(isMounted) addLog(`DELAYED_CHECK_${ms}ms`, auth.currentUser ? auth.currentUser.uid : "null");
+        }, ms);
+      });
+
+    } else {
+      if (isMounted) { 
+        addLog("LOCAL_MODE_START");
+        setNeedsLogin(false); 
+        setUser({ uid: 'local-user-static' }); 
+        setAuthChecked(true); 
+      }
+    }
+    return () => { isMounted = false; if (typeof unsubAuth === "function") unsubAuth(); };
+  }, [cloudMode]);
+
+  const startLogin = async () => {
+    if (!auth) return;
+    const provider = new GoogleAuthProvider();
+    setAuthError(null);
+    addLog("START_LOGIN_CLICKED");
+    try {
+      addLog("SET_PERSISTENCE_START");
+      await setPersistence(auth, browserLocalPersistence);
+      addLog("SET_PERSISTENCE_SUCCESS");
+
+      if (isMobileDevice) {
+        addLog("SIGN_IN_REDIRECT_CALL");
+        await signInWithRedirect(auth, provider);
+      } else {
+        addLog("SIGN_IN_POPUP_CALL");
+        const res = await signInWithPopup(auth, provider);
+        if (res?.user) {
+          addLog("SIGN_IN_POPUP_SUCCESS", res.user.uid);
+          setUser(res.user); 
+        }
+      }
+    } catch (err) {
+      addLog("LOGIN_EXEC_ERROR", err.code);
+      setAuthError(`認証失敗: ${err.code}`);
+      setNeedsLogin(true);
+    }
+  };
+
+  const forceReloadNoCache = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("t", Date.now().toString());
+    window.location.href = url.toString();
+  };
+
+  const hardSignOut = async () => {
+    addLog("HARD_SIGNOUT_START");
+    try {
+      await signOut(auth);
+      Object.keys(localStorage).forEach(key => {
+        if(key.includes("firebase")) localStorage.removeItem(key);
+      });
+      addLog("HARD_SIGNOUT_SUCCESS");
+      forceReloadNoCache();
+    } catch(e) { addLog("HARD_SIGNOUT_FAIL", e.message); }
+  };
+
+  // 統計データ用メモ
   const stats = useMemo(() => {
     const res = { regions: {}, prefs: {}, subAreas: {}, total: data.length };
     data.filter(Boolean).forEach(item => {
@@ -231,6 +353,7 @@ const GourmetApp = () => {
     return res;
   }, [data, selectedPrefecture]);
 
+  // フィルタ済みデータ用メモ
   const filteredData = useMemo(() => {
     let res = data.filter(Boolean);
     if (activeTab === 'favorites') res = res.filter(item => item.isFavorite);
@@ -242,6 +365,7 @@ const GourmetApp = () => {
     return res;
   }, [data, searchTerm, selectedPrefecture, activeTab]);
 
+  // グループ化データ用メモ
   const groupedData = useMemo(() => {
     const groups = {};
     filteredData.forEach(i => {
@@ -252,76 +376,7 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
-  useEffect(() => {
-    const script = document.createElement('script');
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    script.async = true;
-    script.onload = () => setLibLoaded(true);
-    script.onerror = () => setLibLoaded(true); 
-    document.head.appendChild(script);
-    const timer = setTimeout(() => { setLibLoaded(true); }, 4000);
-    return () => { clearTimeout(timer); if (document.head.contains(script)) document.head.removeChild(script); };
-  }, []);
-
-  // 認証 (iPhone Safari セッション復元強化)
-  useEffect(() => {
-    let unsubAuth = null;
-    let isMounted = true;
-
-    if (cloudMode && canUseCloud) {
-      // 必須修正4: getRedirectResult での明示的反映
-      getRedirectResult(auth)
-        .then((res) => { 
-          if (res?.user && isMounted) {
-            setRedirectResultLog({ status: 'success', code: 'OK', time: new Date().toLocaleTimeString() });
-            setUser(res.user); // 明示的にセット
-          } else {
-            setRedirectResultLog({ status: 'no_result', code: '-', time: new Date().toLocaleTimeString() });
-          }
-        })
-        .catch((err) => {
-          if (isMounted) {
-            setRedirectResultLog({ status: 'error', code: err.code, time: new Date().toLocaleTimeString() });
-            setAuthError(`Auth Error: ${err.code}`);
-            setNeedsLogin(true);
-            setAuthChecked(true);
-          }
-        });
-
-      unsubAuth = onAuthStateChanged(auth, (u) => { 
-        if (!isMounted) return;
-        setLastAuthEvent(new Date().toLocaleTimeString());
-        if (!u) { setNeedsLogin(true); setUser(null); } 
-        else { setNeedsLogin(false); setUser(u); }
-        setAuthChecked(true);
-      });
-    } else {
-      if (isMounted) { setNeedsLogin(false); setUser({ uid: 'local-user-static' }); setAuthChecked(true); }
-    }
-    return () => { isMounted = false; if (typeof unsubAuth === "function") unsubAuth(); };
-  }, [cloudMode]);
-
-  // 必須修正3: setPersistence を await するログイン処理
-  const startLogin = async () => {
-    if (!auth) return;
-    const provider = new GoogleAuthProvider();
-    setAuthError(null);
-    try {
-      // iPhone Safari 用に永続化設定を確定させてからリダイレクト
-      await setPersistence(auth, browserLocalPersistence);
-      
-      if (isMobileDevice) {
-        await signInWithRedirect(auth, provider);
-      } else {
-        const res = await signInWithPopup(auth, provider);
-        if (res?.user) setUser(res.user); 
-      }
-    } catch (err) {
-      setAuthError(`認証失敗: ${err.code || err.message}`);
-      setNeedsLogin(true);
-    }
-  };
-
+  // データ同期ロジック
   useEffect(() => {
     if (!user || user.uid.startsWith('local-user')) { loadLocalData(); return; }
     let unsubSnapshot = null;
@@ -336,7 +391,7 @@ const GourmetApp = () => {
           setFsError(`Sync Fail: ${err.code}`);
           loadLocalData(); setIsSyncing(false);
         });
-      } catch (e) { console.error("Snapshot error:", e); }
+      } catch (e) { console.error(e); }
     } else { loadLocalData(); }
     return () => { if (typeof unsubSnapshot === "function") unsubSnapshot(); };
   }, [user, cloudMode, syncTrigger]);
@@ -345,17 +400,11 @@ const GourmetApp = () => {
     try {
       const saved = localStorage.getItem('gourmetStores');
       if (saved) setData(JSON.parse(saved));
-    } catch (e) { console.error("local-load-err", e); }
+    } catch (e) {}
   };
 
   const saveData = async (storesToSave) => {
     const safeStores = Array.isArray(storesToSave) ? storesToSave.filter(Boolean) : [];
-    const newDataMap = new Map(data.filter(Boolean).map(item => [item.id, item]));
-    safeStores.forEach(s => {
-      const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
-      newDataMap.set(docId, { ...s, id: docId });
-    });
-    const allData = Array.from(newDataMap.values());
     if (canUseCloud && cloudMode && db && user && !user.uid.startsWith('local-user')) {
       setIsSyncing(true);
       try {
@@ -373,6 +422,12 @@ const GourmetApp = () => {
       } catch (e) { setFsError(`Write Error: ${e.code}`); }
       setIsSyncing(false);
     } else {
+      const newDataMap = new Map(data.filter(Boolean).map(item => [item.id, item]));
+      safeStores.forEach(s => {
+        const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
+        newDataMap.set(docId, { ...s, id: docId });
+      });
+      const allData = Array.from(newDataMap.values());
       setData(allData);
       localStorage.setItem('gourmetStores', JSON.stringify(allData));
     }
@@ -403,29 +458,14 @@ const GourmetApp = () => {
     const debugText = JSON.stringify({
       version: VERSION,
       href: window.location.href,
-      hostname: window.location.hostname,
-      ua: navigator.userAgent,
-      cookies: navigator.cookieEnabled,
       ls: lsStatus,
       cloud: { canUseCloud, cloudMode, appId },
-      config: { authDomain: firebaseConfig?.authDomain, projectId: firebaseConfig?.projectId },
-      instances: { auth: !!auth, db: !!db },
-      user: user ? { uid: user.uid, email: user.email } : null,
-      state: { needsLogin, authChecked },
-      errors: { authError, fsError },
-      events: { lastAuthEvent, redirectResult: redirectResultLog }
+      user: user ? { uid: user.uid } : null,
+      timeline: logs
     }, null, 2);
-
-    // Safari 用 fallback コピー
-    const el = document.createElement('textarea');
-    el.value = debugText;
-    document.body.appendChild(el);
-    el.select();
-    try {
-      document.execCommand('copy');
-      alert("Debug Info Copied!");
-    } catch (e) { alert("Copy failed. Please select manually."); }
-    document.body.removeChild(el);
+    const el = document.createElement('textarea'); el.value = debugText; document.body.appendChild(el); el.select();
+    document.execCommand('copy'); document.body.removeChild(el);
+    alert("Debug Log Copied!");
   };
 
   if (!authChecked || !libLoaded) {
@@ -437,170 +477,116 @@ const GourmetApp = () => {
     );
   }
 
-  // --- UI Parts ---
+  // デバッグパネルUI
   const DebugPanel = () => (
-    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-80 bg-slate-900 text-[10px] text-slate-300 font-mono transition-transform border-t sm:border-l border-white/20 ${isDebugOpen ? 'translate-y-0' : 'translate-y-[calc(100%-36px)]'}`}>
-      <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer" onClick={() => setIsDebugOpen(!isDebugOpen)}>
-        <span className="font-bold text-orange-500 flex items-center gap-2"><Bug size={12}/> DEBUG PANEL</span>
+    <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[10px] text-slate-300 font-mono transition-transform border-t sm:border-l border-white/20 shadow-2xl overflow-hidden flex flex-col ${isDebugOpen ? 'translate-y-0 h-[80vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
+      <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shrink-0" onClick={() => setIsDebugOpen(!isDebugOpen)}>
+        <span className="font-bold text-orange-500 flex items-center gap-2"><Bug size={12}/> DIAGNOSTIC SYSTEM</span>
         {isDebugOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
       </div>
-      <div className="p-4 space-y-2 max-h-[60vh] overflow-y-auto scrollbar-hide">
-        <div className="grid grid-cols-2 gap-1 border-b border-white/5 pb-2">
-          <span className="text-slate-500">VERSION:</span><span>{VERSION}</span>
-          <span className="text-slate-500">AUTH_CHK:</span><span className={authChecked ? "text-green-500":"text-rose-500"}>{String(authChecked)}</span>
-          <span className="text-slate-500">USER_UID:</span><span className="truncate">{user?.uid || 'null'}</span>
-          <span className="text-slate-500">HOST:</span><span className="truncate">{window.location.hostname}</span>
-          <span className="text-slate-500">COOKIES:</span><span>{String(navigator.cookieEnabled)}</span>
-          <span className="text-slate-500">LS_STATUS:</span><span className={lsStatus === 'OK' ? "text-green-500":"text-rose-500"}>{lsStatus}</span>
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
+        <div className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-1">
+          <div className="flex justify-between"><span>Cookies:</span><span>{String(envStatus.cookies)}</span></div>
+          <div className="flex justify-between"><span>LocalStorage:</span><span className={envStatus.ls ? "text-green-500":"text-rose-500"}>{envStatus.ls?"OK":"FAIL"}</span></div>
+          <div className="flex justify-between"><span>IndexedDB:</span><span className={envStatus.idb ? "text-green-500":"text-rose-500"}>{envStatus.idb?"OK":"FAIL"}</span></div>
+        </div>
+        {redirectLog.status === 'no_result' && !user && (
+          <div className="p-3 bg-amber-900/40 border border-amber-500/50 rounded-xl text-amber-200">
+            <p className="font-bold underline mb-1 italic">Check Authorized Domains</p>
+            <p>リダイレクト結果がありません。ドメイン <b>{window.location.hostname}</b> を許可設定してください。</p>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={forceReloadNoCache} className="py-2 bg-slate-700 rounded font-bold flex items-center justify-center gap-1"><RotateCcw size={10}/> Reload</button>
+          <button onClick={hardSignOut} className="py-2 bg-rose-900/60 rounded font-bold flex items-center justify-center gap-1 text-rose-200"><Trash size={10}/> SignOut</button>
         </div>
         <div className="space-y-1">
-          <p className="text-slate-500 mt-2">REDIRECT_RESULT:</p>
-          <p className={`pl-2 ${redirectResultLog.status === 'success' ? 'text-green-500' : 'text-amber-500'}`}>
-            [{redirectResultLog.status}] {redirectResultLog.code}
-          </p>
-          <p className="pl-2 opacity-50">@{redirectResultLog.time}</p>
-          
-          <p className="text-slate-500 mt-2">LAST_AUTH_STATE_CHANGE:</p>
-          <p className="pl-2 opacity-50">@{lastAuthEvent}</p>
-          
-          <p className="text-slate-500 mt-2">FIREBASE_CONFIG:</p>
-          <p className="pl-2 truncate">Domain: {firebaseConfig?.authDomain}</p>
+          <div className="flex justify-between items-center"><p className="text-slate-500 uppercase tracking-widest">Auth Timeline</p><button onClick={copyDebugData} className="text-orange-500 text-[8px] hover:underline">COPY ALL</button></div>
+          <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-64 overflow-y-auto scrollbar-hide text-[9px]">
+            {logs.map((log, i) => (
+              <div key={i} className="flex gap-2 items-start border-b border-white/5 pb-1 last:border-0">
+                <span className="text-slate-600 shrink-0">{log.time}</span>
+                <span className="text-orange-400 font-bold shrink-0">{log.event}</span>
+                <span className="text-slate-400 break-all">{log.value}</span>
+              </div>
+            ))}
+          </div>
         </div>
-        <button onClick={copyDebugData} className="w-full mt-4 py-2 bg-orange-600 text-white font-bold rounded flex items-center justify-center gap-2 hover:bg-orange-700 transition-colors"><Copy size={12}/> Copy Debug JSON</button>
       </div>
     </div>
   );
 
   return (
-    <ErrorBoundary>
-      <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
-        
-        <DebugPanel />
-
-        {!user ? (
-          <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 font-sans text-center">
-            <div className="animate-in fade-in duration-700 max-w-sm">
-              <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl mb-8 inline-block"><Store size={40} /></div>
-              <h2 className="text-3xl font-black text-slate-800 mb-2 uppercase italic tracking-tighter">Gourmet Master</h2>
-              <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストを同期しましょう。</p>
-              {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold border border-rose-100 flex items-center gap-2 text-left"><ShieldAlert className="shrink-0" size={16}/> {authError}</div>}
-              <button onClick={startLogin} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black shadow-2xl hover:bg-slate-800 active:scale-95 transition-all flex items-center justify-center gap-3 text-lg">
-                <Cloud size={24} /> Googleでログイン
-              </button>
-              <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user-manual'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase">ログインせずに開始</button>
-            </div>
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
+      <DebugPanel />
+      {!user ? (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 font-sans text-center">
+          <div className="animate-in fade-in duration-700 max-w-sm">
+            <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl mb-8 inline-block"><Store size={40} /></div>
+            <h2 className="text-3xl font-black text-slate-800 mb-2 uppercase italic tracking-tighter">Gourmet Master</h2>
+            {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold border border-rose-100 flex items-center gap-2 text-left"><ShieldAlert className="shrink-0" size={16}/> {authError}</div>}
+            <button onClick={startLogin} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black shadow-2xl hover:bg-slate-800 active:scale-95 transition-all flex items-center justify-center gap-3 text-lg"><Cloud size={24} /> Googleでログイン</button>
+            <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user-manual'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase">ログインせずに開始</button>
           </div>
-        ) : (
-          <>
-            <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
-              <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
-                <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
-                <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block italic">Gourmet<span className="text-orange-500">Master</span></h1>
-              </div>
-              <div className="flex-1 max-w-xl relative group">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
-                <input type="text" placeholder="店名や住所で検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                 <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}><Cloud size={20} /></div>
-                 <label className={`p-2.5 rounded-2xl shadow-xl transition-all active:scale-95 hidden sm:flex ${libLoaded && window.XLSX ? 'bg-slate-900 text-white cursor-pointer hover:bg-slate-800' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
-                   <Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={(e) => { if(!window.XLSX){alert("読込中"); return;} }} disabled={!(libLoaded && window.XLSX)} />
-                 </label>
-              </div>
-            </header>
+        </div>
+      ) : (
+        <>
+          <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
+            <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
+              <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
+              <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block italic">Gourmet Master</h1>
+            </div>
+            <div className="flex-1 max-w-xl relative group">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
+              <input type="text" placeholder="店名や住所で検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+            </div>
+          </header>
 
-            <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
-              {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
-                  {tab.icon} {tab.label}
-                </button>
-              ))}
-            </nav>
+          <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
+            {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
+                {tab.icon} {tab.label}
+              </button>
+            ))}
+          </nav>
 
-            <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
-              {data.length === 0 ? (
-                <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100">
-                    <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={80} />
-                    <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Import Required</h2>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
-                      <button onClick={() => saveData([{id:'sample-1',店舗名:"サンプル名店 銀座",住所:"東京都中央区銀座1-1-1",カテゴリ:"和食",都道府県:"東京都",isFavorite:true,NO:1}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest uppercase">Sample Data</button>
-                      <label className={`py-5 border-2 rounded-[2rem] font-black transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase ${libLoaded && window.XLSX ? 'border-slate-200 text-slate-600 cursor-pointer hover:bg-slate-50' : 'border-slate-100 text-slate-300 cursor-not-allowed bg-slate-50'}`}>Upload CSV/XLSX<input type="file" className="hidden" accept=".csv, .xlsx" disabled={!(libLoaded && window.XLSX)} /></label>
-                    </div>
-                </div>
-              ) : (
-                <div className="space-y-16 animate-in fade-in duration-700 pb-32">
-                  {activeTab === 'map' && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                      {Object.keys(regions).map(reg => {
-                        const count = data.filter(Boolean).filter(d => (regions[reg] || []).includes(d.都道府県)).length;
-                        if (count === 0 && reg !== '関東') return null;
-                        return (
-                          <button key={reg} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[190px] relative overflow-hidden active:scale-95">
-                            <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:opacity-10 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
-                            <div className="relative z-10"><p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-1">{reg} Area</p><h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors">{reg}</h3></div>
-                            <div className="relative z-10 mt-6 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-500 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors">{count} STORES</span><ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {activeTab !== 'map' && (
-                    <div className="flex flex-col lg:flex-row gap-10">
-                      <aside className="lg:w-72 shrink-0 hidden lg:block">
-                         <div className="bg-white p-7 rounded-[3rem] border border-slate-200 shadow-sm sticky top-44 space-y-7">
-                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b pb-4 italic"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
-                          <div className="flex flex-col gap-2 max-h-[60vh] overflow-y-auto scrollbar-hide pr-2">
-                            {groupedData.map(([category, stores]) => (
-                              <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest">
-                                <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-2 py-0.5 rounded shadow-sm">{stores.length}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </aside>
-                      <div className="flex-1 space-y-20 min-w-0">
-                        {groupedData.map(([category, stores]) => (
-                          <div key={category} id={`category-section-${sanitizeId(category)}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4">
-                            <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter italic"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
-                            <div className={viewMode === 'detail' ? "grid grid-cols-1 md:grid-cols-2 gap-8" : "space-y-3"}>
-                              {stores.map(store => (
-                                <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
-                                  <div className="relative h-60 overflow-hidden bg-slate-100">
-                                    <img 
-                                      src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length + (store.カテゴリ?.length || 0)}`} 
-                                      alt={store.店舗名} 
-                                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" 
-                                      onError={(e) => { if (e.currentTarget.dataset.fallback) return; e.currentTarget.dataset.fallback = "1"; e.currentTarget.src = `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length + (store.カテゴリ?.length || 0)}`; }}
-                                    />
-                                    <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div>
-                                    <button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button>
-                                    <div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight uppercase italic">{store.店舗名}</h4></div>
-                                  </div>
-                                  <div className="p-8 flex-1 flex flex-col font-bold text-sm text-slate-500 space-y-4 tracking-tight">
-                                    <div className="flex items-start gap-4"><div className="bg-orange-50 p-2 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1 tracking-widest">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed">{store.住所}</span></div></div>
-                                    {store.URL && store.URL !== '' && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black text-center"><span className="truncate text-xs tracking-widest uppercase flex-1">Visit Website</span></a>)}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
+          <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen pb-32">
+            {groupedData.map(([category, stores]) => (
+              <div key={category} id={`category-section-${sanitizeId(category)}`} className="space-y-8 mb-16 scroll-mt-44 animate-in slide-in-from-bottom-4">
+                <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter italic"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                  {stores.map(store => (
+                    <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
+                      <div className="relative h-60 overflow-hidden bg-slate-100">
+                        <img 
+                          src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`} 
+                          alt={store.店舗名} 
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" 
+                          onError={(e) => { if (e.currentTarget.dataset.fallback) return; e.currentTarget.dataset.fallback = "1"; e.currentTarget.src = `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名||'').length}`; }}
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div>
+                        <button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button>
+                        <div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight uppercase italic">{store.店舗名}</h4></div>
+                      </div>
+                      <div className="p-8 flex-1 flex flex-col font-bold text-sm text-slate-500 space-y-4 tracking-tight">
+                        <div className="flex items-start gap-4"><div className="bg-orange-50 p-2 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1 tracking-widest">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed">{store.住所}</span></div></div>
                       </div>
                     </div>
-                  )}
+                  ))}
                 </div>
-              )}
-            </main>
-          </>
-        )}
-      </div>
-    </ErrorBoundary>
+              </div>
+            ))}
+          </main>
+        </>
+      )}
+    </div>
   );
 };
 
-// --- App エクスポート ---
 const App = () => (
-  <GourmetApp />
+  <ErrorBoundary>
+    <GourmetApp />
+  </ErrorBoundary>
 );
 
 export default App;
