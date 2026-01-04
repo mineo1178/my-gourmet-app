@@ -27,7 +27,7 @@ import {
   signOut
 } from 'firebase/auth';
 
-const VERSION = "v3.50-SYNC-PRO-FINAL";
+const VERSION = "v3.51-SYNC-SPEED-FIX";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -162,7 +162,6 @@ const GourmetApp = () => {
 
   const isMobile = useMemo(() => checkIsMobile(), []);
   
-  // 共有キーまたはGoogleログインUIDに基づいたコレクションパス
   const firestoreCollectionPath = shareKey 
     ? `artifacts/${appId}/shared/${shareKey}/stores` 
     : user && !user.isAnonymous 
@@ -174,14 +173,12 @@ const GourmetApp = () => {
     addLog("SHARE_KEY_UPDATED", shareKey || "none");
   }, [shareKey]);
 
-  // 初期化時の環境チェック
   useEffect(() => {
     const testStorage = (type) => { try { const key = `__t_${type}`; window[type].setItem(key, "1"); window[type].removeItem(key); return "OK"; } catch(e) { return "FAIL"; } };
     setEnvStatus({ ls: testStorage('localStorage'), ss: testStorage('sessionStorage'), cookies: navigator.cookieEnabled });
     addLog("APP_START", { version: VERSION, canUseCloud });
   }, []);
 
-  // 認証ロジック：未ログイン時は匿名認証を自動実行
   useEffect(() => {
     if (!cloudMode || !auth) {
       if (!cloudMode) setUser({ uid: 'local-user', isAnonymous: true });
@@ -231,7 +228,6 @@ const GourmetApp = () => {
     }
   };
 
-  // --- データ購読と同期 ---
   useEffect(() => {
     if (!user || !firestoreCollectionPath) { 
       loadLocalData(); 
@@ -315,7 +311,52 @@ const GourmetApp = () => {
     }
   };
 
-  // フィルタリング
+  // --- 修正: ファイルアップロード処理の改善 ---
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    if (!window.XLSX) {
+      alert("Excelライブラリが読み込まれていません。ページを再読み込みしてください。");
+      return;
+    }
+
+    addLog("FILE_UPLOAD_START", file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const workbook = window.XLSX.read(e.target.result, { type: 'array' });
+        const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+        
+        const normalized = jsonData.map((item, index) => {
+          const name = item.店舗名 || item['店舗名'] || '名称不明';
+          const addr = item.住所 || item['住所'] || '';
+          const pref = item.都道府県 || item['都道府県'] || 'その他';
+          
+          return {
+            NO: item.NO || item['NO'] || (data.length + index + 1),
+            店舗名: name,
+            カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店',
+            都道府県: pref,
+            住所: addr,
+            URL: item.URL || item['URL'] || '',
+            imageURL: item.imageURL || item['imageURL'] || '',
+            isFavorite: false
+          };
+        });
+        
+        // 高速バッチ保存を使用
+        saveData(normalized);
+        setActiveTab('list');
+        addLog("FILE_IMPORT_SUCCESS", `${normalized.length} items`);
+      } catch (err) { 
+        alert("解析に失敗しました。形式を確認してください。");
+        addLog("FILE_IMPORT_ERROR", err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
   const filteredData = useMemo(() => {
     let res = data.filter(Boolean);
     if (activeTab === 'favorites') res = res.filter(d => d.isFavorite);
@@ -341,7 +382,7 @@ const GourmetApp = () => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => setLibLoaded(true);
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_LIB_READY"); };
     document.head.appendChild(script);
   }, []);
 
@@ -352,7 +393,6 @@ const GourmetApp = () => {
     </div>;
   }
 
-  // --- UI パーツ ---
   const DiagnosticPanel = () => (
     <div className={`fixed bottom-0 right-0 z-[100] w-full sm:w-96 bg-slate-900 text-[9px] text-slate-300 font-mono border-t sm:border-l border-white/20 transition-transform ${isDebugOpen ? 'translate-y-0 h-[75vh]' : 'translate-y-[calc(100%-36px)] h-auto'}`}>
       <div className="flex items-center justify-between px-4 py-2 bg-slate-800 cursor-pointer shadow-lg" onClick={() => setIsDebugOpen(!isDebugOpen)}>
@@ -395,7 +435,7 @@ const GourmetApp = () => {
         </div>
 
         <div className="space-y-1">
-          <div className="flex justify-between items-center"><span className="text-slate-500 uppercase tracking-widest font-black">Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline">COPY</button></div>
+          <div className="flex justify-between items-center font-black text-slate-500 uppercase tracking-widest"><span>Timeline</span><button onClick={() => { const txt = logs.map(l => `[${l.time}] ${l.event}: ${l.value}`).join("\n"); const el = document.createElement('textarea'); el.value = txt; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); alert("Log Copied!"); }} className="text-orange-500 text-[8px] hover:underline">COPY</button></div>
           <div className="bg-black/60 rounded-xl p-3 border border-white/5 space-y-2 h-72 overflow-y-auto text-[8px] scrollbar-hide">
             {logs.map((l, i) => ( <div key={i} className="flex gap-2 last:mb-8 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
           </div>
@@ -408,7 +448,7 @@ const GourmetApp = () => {
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
       <DiagnosticPanel />
 
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
         <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
           <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block italic">Gourmet Master</h1>
@@ -419,9 +459,13 @@ const GourmetApp = () => {
         </div>
         <div className="flex items-center gap-2 shrink-0">
            <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}><Cloud size={20} /></div>
-           <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex"><Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" /></label>
+           <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
+             <Upload size={20} />
+             {/* 修正: onChange を追加 */}
+             <input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
+           </label>
            {(!user || user.isAnonymous) && (
-             <button onClick={startLogin} className="p-2.5 bg-white border border-slate-200 text-slate-400 rounded-2xl hover:bg-slate-50 transition-all hidden sm:flex" title="Googleログイン（同期キー不要）"><LinkIcon size={20} /></button>
+             <button onClick={startLogin} className="p-2.5 bg-white border border-slate-200 text-slate-400 rounded-2xl hover:bg-slate-50 transition-all hidden sm:flex" title="Googleログイン"><LinkIcon size={20} /></button>
            )}
         </div>
       </header>
