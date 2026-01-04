@@ -4,7 +4,7 @@ import {
   Upload, Trash2, Edit2, X, Store, Heart, Save, 
   Loader2, Map as MapIcon, Grid, Database, 
   ChevronRight, Layers, ArrowDown, 
-  Cloud, Copy, RefreshCcw, ShieldAlert
+  Cloud, Copy, RefreshCcw, ShieldAlert, List // List を追加
 } from 'lucide-react';
 
 // Firebase SDK インポート
@@ -20,11 +20,11 @@ import {
   signInWithRedirect,
   signInWithPopup,
   getRedirectResult,
-  setPersistence, // ③ 追加
-  browserLocalPersistence // ③ 追加
+  setPersistence,
+  browserLocalPersistence
 } from 'firebase/auth';
 
-const VERSION = "v3.20-AUTH-STABLE";
+const VERSION = "v3.21-CRASH-FIX"; // バージョンのみ更新
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -148,7 +148,6 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
   try {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
-    // ③ 永続化を明示
     setPersistence(auth, browserLocalPersistence).catch(console.error);
     db = getFirestore(firebaseApp);
   } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
@@ -173,7 +172,7 @@ const GourmetApp = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [libLoaded, setLibLoaded] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
-  const [authChecked, setAuthChecked] = useState(false); // ② 追加
+  const [authChecked, setAuthChecked] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -192,7 +191,6 @@ const GourmetApp = () => {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
-  // XLSX / CSV ローダー
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
@@ -204,44 +202,27 @@ const GourmetApp = () => {
     return () => { clearTimeout(timer); if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // ② 認証 useEffect 修正
   useEffect(() => {
     let unsubAuth = null;
     let isMounted = true;
-
     if (cloudMode && canUseCloud) {
-      // リダイレクト結果の拾い上げ
       getRedirectResult(auth)
-        .then((res) => { 
-          if (res?.user && isMounted) console.log("Login Success via Redirect Result");
-        })
+        .then((res) => { if (res?.user && isMounted) console.log("Login Success"); })
         .catch((err) => {
           if (isMounted) {
             setAuthError(`Auth Error: ${err.code}`);
             setNeedsLogin(true);
-            setAuthChecked(true); // エラーでもチェック完了
+            setAuthChecked(true);
           }
         });
-
-      // 認証状態の監視
       unsubAuth = onAuthStateChanged(auth, (u) => { 
         if (!isMounted) return;
-        if (!u) { 
-          setNeedsLogin(true); 
-          setUser(null);
-        } else { 
-          setNeedsLogin(false);
-          setUser(u); 
-        }
-        // 状態が確定したのでフラグを立てる
+        if (!u) { setNeedsLogin(true); setUser(null); } 
+        else { setNeedsLogin(false); setUser(u); }
         setAuthChecked(true);
       });
     } else {
-      if (isMounted) { 
-        setNeedsLogin(false); 
-        setUser({ uid: 'local-user-static' }); 
-        setAuthChecked(true); // ローカルモードでもチェック完了
-      }
+      if (isMounted) { setNeedsLogin(false); setUser({ uid: 'local-user-static' }); setAuthChecked(true); }
     }
     return () => { isMounted = false; if (typeof unsubAuth === "function") unsubAuth(); };
   }, [cloudMode, syncTrigger]);
@@ -259,7 +240,6 @@ const GourmetApp = () => {
     }
   };
 
-  // 同期
   useEffect(() => {
     if (!user || user.uid.startsWith('local-user')) { loadLocalData(); return; }
     let unsubSnapshot = null;
@@ -375,7 +355,6 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
-  // ② 表示制御: 認証チェックが終わるまでスピナー
   if (!authChecked || !libLoaded) {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans">
@@ -387,11 +366,10 @@ const GourmetApp = () => {
     );
   }
 
-  // 認証チェック完了後、ユーザーがいない場合はログイン画面
   if (!user) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 font-sans">
-        <div className="animate-in fade-in duration-700 max-w-sm text-center">
+      <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 font-sans text-center">
+        <div className="animate-in fade-in duration-700 max-w-sm">
           <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl mb-8 inline-block"><Store size={40} /></div>
           <h2 className="text-3xl font-black text-slate-800 mb-2 uppercase italic tracking-tighter">Gourmet Master</h2>
           <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストをクラウド同期・共有管理します。</p>
@@ -413,12 +391,12 @@ const GourmetApp = () => {
           <span className="text-orange-500 font-black">{VERSION}</span>
           <span>MODE: <span className={canUseCloud && cloudMode ? "text-green-400" : "text-amber-400"}>{canUseCloud && cloudMode ? "CLOUD" : "LOCAL"}</span></span>
           <span className="hidden md:inline">UID: {user.uid.slice(0, 12)}...</span>
-          <button onClick={() => setSyncTrigger(t => t + 1)} className="p-1 hover:text-white transition-colors"><RefreshCcw size={10}/></button>
+          <button onClick={() => setSyncTrigger(t => t + 1)} className="p-1 hover:text-white transition-colors" title="Force Resync"><RefreshCcw size={10}/></button>
           <button onClick={() => {
             const el = document.createElement('textarea'); el.value = firestorePath; 
             document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
             alert("PATH_COPIED");
-          }} className="p-1 hover:text-white transition-colors"><Copy size={10}/></button>
+          }} className="p-1 hover:text-white transition-colors" title="Copy Path"><Copy size={10}/></button>
         </div>
       </div>
 
@@ -542,7 +520,7 @@ const GourmetApp = () => {
                             </div>
                           ) : (
                             <div key={store.id} className="bg-white px-8 py-4 rounded-[2rem] border border-slate-200/60 shadow-sm hover:border-orange-500 hover:shadow-xl transition-all flex items-center justify-between group">
-                              <div className="flex items-center gap-6 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL && store.URL !== '' ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2 italic uppercase tracking-tighter">{store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl uppercase italic tracking-tighter">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-1.5 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県}</span><span className="bg-slate-100 px-2.5 py-0.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '飲食店')}</span></div></div></div>
+                              <div className="flex items-center gap-6 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL && store.URL !== '' ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2 italic uppercase tracking-tighter">{store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl uppercase italic tracking-tighter">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-1.5 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '飲食店')}</span></div></div></div>
                               <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-rose-500 bg-rose-50' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button></div>
                             </div>
                           )
