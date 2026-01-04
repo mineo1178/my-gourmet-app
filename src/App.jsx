@@ -1,40 +1,53 @@
-import React, { useState, useMemo, useEffect, Component, useDeferredValue } from 'react';
-import {
-  Search, MapPin, Upload, Trash2, X, Store, Heart,
-  Loader2, Map as MapIcon, Grid, Database, ChevronRight, Layers, ArrowDown,
-  Cloud, ShieldAlert, Bug
+import React, { useState, useEffect, useMemo, useRef, Component } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { 
+  getFirestore, collection, addDoc, onSnapshot, 
+  query, serverTimestamp, doc, setDoc 
+} from 'firebase/firestore';
+import { 
+  getAuth, signInAnonymously, onAuthStateChanged, 
+  signInWithCustomToken, setPersistence, browserLocalPersistence 
+} from 'firebase/auth';
+import { 
+  Cloud, WifiOff, Send, Terminal, Loader2, 
+  AlertCircle, CheckCircle2, Database, RefreshCcw, 
+  Smartphone, Monitor, Globe, ShieldAlert
 } from 'lucide-react';
 
-// Firebase SDK
-import { initializeApp, getApps } from 'firebase/app';
-import {
-  getFirestore, collection, doc, setDoc, onSnapshot,
-  deleteDoc, writeBatch, serverTimestamp
-} from 'firebase/firestore';
-import {
-  getAuth,
-  onAuthStateChanged,
-  signInAnonymously,
-  setPersistence,
-  browserLocalPersistence,
-} from 'firebase/auth';
+// ★ バージョン定義
+const VERSION = "Gen_v3.85-SYNC-DEBUG-FIX";
 
-// ★ バージョン
-const VERSION = "GTP_v3.71-PUBLIC-SYNC-NOAUTH-GUARD-JS";
-
-// --- ErrorBoundary ---
+// --- A. ErrorBoundary コンポーネント (修正: 定義を追加) ---
 class ErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
-  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center text-xs">
-          <ShieldAlert size={48} className="text-rose-500 mb-4" />
-          <h1 className="text-lg font-black uppercase">System Error</h1>
-          <p className="mt-2 text-rose-400 font-bold">{this.state.error?.message}</p>
-          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-black rounded-xl font-bold uppercase">
-            Reset App
+        <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center">
+          <ShieldAlert size={64} className="text-rose-500 mb-6 animate-pulse" />
+          <h1 className="text-2xl font-black uppercase mb-2">システムエラーが発生しました</h1>
+          <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8 text-left overflow-auto">
+            <p className="text-rose-400 font-bold text-sm break-all">
+              {this.state.error?.toString() || "不明なレンダリングエラー"}
+            </p>
+          </div>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="px-10 py-4 bg-white text-slate-900 rounded-2xl font-black uppercase shadow-2xl active:scale-95 transition-all"
+          >
+            アプリを再起動する
           </button>
         </div>
       );
@@ -43,500 +56,278 @@ class ErrorBoundary extends Component {
   }
 }
 
-// --- 定数 ---
-const regions = {
-  '北海道': ['北海道'],
-  '東北': ['青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県'],
-  '関東': ['茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県'],
-  '中部': ['新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県', '岐阜県', '静岡県', '愛知県'],
-  '近畿': ['三重県', '滋賀県', '京都府', '大阪府', '兵庫県', '奈良県', '和歌山県'],
-  '中国': ['鳥取県', '島根県', '岡山県', '広島県', '山口県'],
-  '四国': ['徳島県', '香川県', '愛媛県', '高知県'],
-  '九州・沖縄': ['福岡県', '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県']
-};
-
-const getSubArea = (pref, address = "") => {
-  if (!address) return "エリア";
-  const match = address.match(/^(.*?[市郡区])/);
-  return match ? match[1].replace(pref, "") : "主要";
-};
-
-// --- Firebase config ---
-const getFirebaseConfig = () => {
-  try {
-    if (typeof window.__firebase_config !== 'undefined' && window.__firebase_config) {
-      return { firebaseConfig: JSON.parse(window.__firebase_config), ok: true, source: "runtime" };
-    }
-    const env = import.meta.env || {};
-    if (env.VITE_FIREBASE_API_KEY) {
-      return {
-        firebaseConfig: {
-          apiKey: env.VITE_FIREBASE_API_KEY,
-          authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
-          projectId: env.VITE_FIREBASE_PROJECT_ID,
-          storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
-          messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-          appId: env.VITE_FIREBASE_APP_ID,
-        },
-        ok: true,
-        source: "env"
-      };
-    }
-  } catch (e) { console.error(e); }
-  return { firebaseConfig: null, ok: false, source: "none" };
-};
-
-const cfg = getFirebaseConfig();
-const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'gourmet-master-v1';
-
-let firebaseApp = null, auth = null, db = null;
-if (cfg.ok && cfg.firebaseConfig?.apiKey) {
-  try {
-    firebaseApp = getApps().length === 0 ? initializeApp(cfg.firebaseConfig) : getApps()[0];
-    auth = getAuth(firebaseApp);
-    db = getFirestore(firebaseApp);
-  } catch (e) { console.error(e); }
-}
-
-const canUseCloud = Boolean(db); // auth不要で同期を試す
-
-const GourmetApp = () => {
-  const [data, setData] = useState([]);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [activeTab, setActiveTab] = useState('map');
-  const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
-  const [authState, setAuthState] = useState('unknown');
-  const [libLoaded, setLibLoaded] = useState(false);
-
-  const [searchTermInput, setSearchTermInput] = useState('');
-  const searchTerm = useDeferredValue(searchTermInput);
-
-  const [isDebugOpen, setIsDebugOpen] = useState(false);
+// --- B. アプリケーション本体 ---
+const AppContent = () => {
   const [logs, setLogs] = useState([]);
+  const [syncData, setSyncData] = useState([]);
+  const [inputText, setInputText] = useState('');
+  const [user, setUser] = useState(null);
+  const [status, setStatus] = useState('初期化中...');
+  const [isConnecting, setIsConnecting] = useState(false);
 
-  const addLog = (event, value = "-") => {
-    const d = new Date();
-    const time = d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      + '.' + String(d.getMilliseconds()).padStart(3, '0');
-    setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 120));
+  // Firebase インスタンス管理
+  const [instances, setInstances] = useState({ auth: null, db: null });
+  
+  // アプリIDと環境設定の取得
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'debug-sync-v1';
+
+  // ログ追加関数
+  const addLog = (msg, type = 'info') => {
+    const time = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    setLogs(prev => [{ time, msg, type }, ...prev].slice(0, 100));
   };
 
-  const firestorePath = `artifacts/${appId}/public/data/stores`;
-
-  // 起動ログ
+  // --- Step 1: Firebase エンジンの起動 ---
   useEffect(() => {
-    addLog("BOOT", { VERSION, canUseCloud, appId, configSource: cfg.source, origin: window.location.origin });
-  }, []);
-
-  // 匿名ログイン（失敗しても同期は続行）
-  useEffect(() => {
-    if (!auth) {
-      setAuthState('no-auth-module');
-      addLog("AUTH_SKIP", "auth instance not created");
-      return;
-    }
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      if (u) {
-        setAuthState(`signed:${u.isAnonymous ? 'anon' : 'user'}`);
-        addLog("AUTH_STATE", { uid: u.uid?.slice(0, 6), anon: u.isAnonymous });
-      } else {
-        setAuthState("none");
-        addLog("AUTH_STATE", "null");
-        try {
-          await setPersistence(auth, browserLocalPersistence);
-          addLog("PERSISTENCE", "OK");
-          await signInAnonymously(auth);
-          addLog("ANON_LOGIN", "TRY");
-        } catch (e) {
-          addLog("ANON_LOGIN_FAIL", `${e?.code || 'unknown'} ${e?.message || ''}`.trim());
-          setAuthState(`anon-fail:${e?.code || 'unknown'}`);
-        }
-      }
-    });
-    return () => unsub();
-  }, []);
-
-  // Firestore購読（user不要）
-  useEffect(() => {
-    if (!canUseCloud) {
-      addLog("CLOUD_OFF", "Firestore not available");
-      return;
-    }
-    setIsSyncing(true);
-    addLog("SYNC_SUBSCRIBE_START", firestorePath);
-
-    const q = collection(db, firestorePath);
-    const unsub = onSnapshot(q, (snap) => {
-      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setData(rows);
-      setIsSyncing(false);
-      addLog("SYNC_SUBSCRIBE_OK", `${rows.length} docs`);
-    }, (err) => {
-      setIsSyncing(false);
-      addLog("SYNC_SUBSCRIBE_ERR", `${err?.code || 'unknown'} ${err?.message || ''}`.trim());
-    });
-
-    return () => unsub();
-  }, [firestorePath]);
-
-  // XLSX読み込み
-  useEffect(() => {
-    const script = document.createElement('script');
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    script.async = true;
-    script.onload = () => { setLibLoaded(true); addLog("XLSX_READY"); };
-    script.onerror = () => addLog("XLSX_LOAD_FAIL");
-    document.head.appendChild(script);
-  }, []);
-
-  const normalizeRows = (jsonData) => {
-    const base = Date.now();
-    return (jsonData || []).map((item, index) => {
-      const 店舗名 = item.店舗名 || item['店舗名'] || item.name || item['name'] || '名称不明';
-      const 住所 = item.住所 || item['住所'] || item.address || item['address'] || '';
-      const docId = (item.id || item.ID || `${店舗名}-${住所}-${base + index}`)
-        .toString()
-        .replace(/[.#$/[\]]/g, "_");
-
-      return {
-        id: docId,
-        NO: item.NO ?? item['NO'] ?? (index + 1),
-        店舗名,
-        カテゴリ: item.カテゴリ || item['カテゴリ'] || item.category || item['category'] || '飲食店',
-        都道府県: item.都道府県 || item['都道府県'] || item.pref || item['pref'] || 'その他',
-        住所,
-        URL: item.URL || item['URL'] || item.url || item['url'] || '',
-        imageURL: item.imageURL || item['imageURL'] || item.image || item['image'] || '',
-        isFavorite: Boolean(item.isFavorite ?? item['isFavorite'] ?? false),
-        updatedAt: null
-      };
-    });
-  };
-
-  // 保存（楽観反映 + Firestore）
-  const saveData = async (storesToSave) => {
-    const safeStores = Array.isArray(storesToSave) ? storesToSave.filter(Boolean) : [];
-    if (safeStores.length === 0) return;
-
-    setData(prev => {
-      const map = new Map();
-      prev.forEach(p => map.set(p.id, p));
-      safeStores.forEach(s => map.set(s.id, { ...(map.get(s.id) || {}), ...s }));
-      return Array.from(map.values());
-    });
-
-    if (!canUseCloud) {
-      addLog("SAVE_SKIP", "cloud not available");
-      return;
-    }
-
-    setIsSyncing(true);
-    addLog("SAVE_START", `${safeStores.length} rows`);
-    try {
-      const batch = writeBatch(db);
-      safeStores.forEach(s => {
-        const ref = doc(db, firestorePath, s.id);
-        batch.set(ref, { ...s, updatedAt: serverTimestamp() }, { merge: true });
-      });
-      await batch.commit();
-      addLog("SAVE_OK");
-    } catch (e) {
-      addLog("SAVE_ERR", `${e?.code || 'unknown'} ${e?.message || ''}`.trim());
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const deleteData = async (id) => {
-    if (!window.confirm("削除しますか？")) return;
-    setData(prev => prev.filter(p => p.id !== id));
-    if (!canUseCloud) return;
-    try {
-      await deleteDoc(doc(db, firestorePath, id));
-      addLog("DEL_OK", id);
-    } catch (e) {
-      addLog("DEL_ERR", `${e?.code || 'unknown'} ${e?.message || ''}`.trim());
-    }
-  };
-
-  const toggleFavorite = async (store) => {
-    const next = !store.isFavorite;
-    setData(prev => prev.map(p => p.id === store.id ? { ...p, isFavorite: next } : p));
-    if (!canUseCloud) return;
-    try {
-      await setDoc(doc(db, firestorePath, store.id), { isFavorite: next, updatedAt: serverTimestamp() }, { merge: true });
-    } catch (e) {
-      addLog("FAV_ERR", `${e?.code || 'unknown'} ${e?.message || ''}`.trim());
-    }
-  };
-
-  const handleFileUpload = (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-
-    const XLSX = window.XLSX;
-    if (!XLSX) {
-      alert("XLSXライブラリがまだ読み込み中です。少し待って再度お試しください。");
-      addLog("IMPORT_FAIL", "XLSX not ready");
-      return;
-    }
-
-    addLog("IMPORT_START", { name: file.name, size: file.size });
-
-    const reader = new FileReader();
-    reader.onerror = () => { addLog("FILE_READER_ERR"); alert("ファイル読み込みに失敗しました"); };
-    reader.onload = (e) => {
+    const boot = async () => {
+      addLog("システム起動: 設定のチェックを開始...", "info");
+      
       try {
-        const wb = XLSX.read(e.target.result, { type: 'array' });
-        const sheetName = wb.SheetNames?.[0];
-        const sheet = wb.Sheets[sheetName];
-        const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-        addLog("IMPORT_PARSED", { sheetName, rows: json.length });
+        if (typeof __firebase_config === 'undefined' || !__firebase_config) {
+          addLog("警告: Firebase設定が見つかりません。環境からの注入を待機中...", "warn");
+          setStatus("設定待機中");
+          setTimeout(boot, 3000);
+          return;
+        }
 
-        const normalized = normalizeRows(json);
-        saveData(normalized);
-        setActiveTab('list');
+        addLog("設定検知: SDKの初期化を実行します。", "info");
+        const config = JSON.parse(__firebase_config);
+        const app = getApps().length === 0 ? initializeApp(config) : getApps()[0];
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        addLog("初期化完了: 認証シーケンスへ移行します。", "success");
+
+        // 匿名認証の実行 (Rule 3)
+        addLog("認証試行: 匿名ログインを開始...", "info");
+        await setPersistence(auth, browserLocalPersistence);
+        
+        let cred;
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          addLog("カスタムトークンを使用してログインします...", "info");
+          cred = await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          addLog("標準の匿名認証を使用してログインします...", "info");
+          cred = await signInAnonymously(auth);
+        }
+
+        setUser(cred.user);
+        setInstances({ auth, db });
+        addLog(`認証成功: ユーザーID ${cred.user.uid.slice(0, 12)}...`, "success");
+        setStatus("接続済み");
       } catch (err) {
-        addLog("IMPORT_PARSE_ERR", err?.message || "unknown");
-        alert("解析に失敗しました（Excel/CSV形式を確認してください）");
+        addLog(`起動致命的エラー: ${err.message}`, "error");
+        setStatus("エラー発生");
+        setTimeout(boot, 5000); // 5秒後に再試行
       }
     };
-    reader.readAsArrayBuffer(file);
+
+    boot();
+  }, []);
+
+  // --- Step 2: リアルタイム同期の開始 (Rule 1 & 3) ---
+  useEffect(() => {
+    if (!user || !instances.db) return;
+
+    addLog(`同期準備: パス /artifacts/${appId}/public/data/debug_messages を監視します。`, "info");
+    setIsConnecting(true);
+
+    const colRef = collection(instances.db, 'artifacts', appId, 'public', 'data', 'debug_messages');
+    
+    addLog("Firestore: 監視リスナー(onSnapshot)を登録しました。", "info");
+    
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      addLog(`更新検知: クラウドから ${snapshot.docs.length} 件のデータを取得しました。`, "success");
+      const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      const sorted = items.sort((a, b) => {
+        const timeA = a.timestamp?.seconds || 0;
+        const timeB = b.timestamp?.seconds || 0;
+        return timeB - timeA;
+      });
+      
+      setSyncData(sorted);
+      setIsConnecting(false);
+    }, (err) => {
+      setIsConnecting(false);
+      addLog(`Firestoreエラー検知: ${err.code} - ${err.message}`, "error");
+      if (err.code === 'permission-denied') {
+        addLog("致命的: 権限エラーです。パス設定(Rule 1)が正しくありません。", "error");
+      }
+    });
+
+    return () => {
+      addLog("同期解除: リスナーを破棄しました。", "info");
+      unsubscribe();
+    };
+  }, [user, instances.db, appId]);
+
+  // --- 送信処理 ---
+  const handleSend = async (e) => {
+    e.preventDefault();
+    if (!inputText.trim() || !user || !instances.db) {
+      addLog("送信拒否: 接続が完了していないか入力が空です。", "warn");
+      return;
+    }
+
+    const textToSend = inputText;
+    setInputText('');
+    addLog(`書き込み開始: "${textToSend}" をクラウドへ送信します。`, "info");
+
+    try {
+      const colRef = collection(instances.db, 'artifacts', appId, 'public', 'data', 'debug_messages');
+      await addDoc(colRef, {
+        text: textToSend,
+        senderId: user.uid.slice(0, 5),
+        device: /iPhone|iPad|iPod/i.test(navigator.userAgent) ? "iPhone" : "Windows/PC",
+        timestamp: serverTimestamp()
+      });
+      addLog("書き込み成功: クラウドDBへの保存が完了しました。", "success");
+    } catch (err) {
+      addLog(`書き込み失敗: ${err.message}`, "error");
+    }
   };
 
-  const filteredData = useMemo(() => {
-    let res = data.filter(Boolean);
-    if (activeTab === 'favorites') res = res.filter(d => d.isFavorite);
-    if (searchTerm) {
-      const t = (searchTerm || '').toLowerCase();
-      res = res.filter(d =>
-        (d.店舗名 || '').toLowerCase().includes(t) ||
-        (d.住所 || '').toLowerCase().includes(t) ||
-        (d.カテゴリ || '').toLowerCase().includes(t)
-      );
-    }
-    if (selectedPrefecture !== 'すべて') res = res.filter(d => d.都道府県 === selectedPrefecture);
-    return res;
-  }, [data, searchTerm, selectedPrefecture, activeTab]);
-
-  const groupedData = useMemo(() => {
-    const groups = {};
-    filteredData.forEach(d => {
-      const c = d.カテゴリ || '未分類';
-      if (!groups[c]) groups[c] = [];
-      groups[c].push(d);
-    });
-    return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
-  }, [filteredData]);
-
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-20 sm:pb-0">
-      {/* Debug */}
-      <button onClick={() => setIsDebugOpen(!isDebugOpen)} className="fixed bottom-4 right-4 z-[100] p-3 bg-slate-900 text-white rounded-full opacity-30 hover:opacity-100" title="Diagnostic">
-        <Bug size={18} />
-      </button>
-
-      {isDebugOpen && (
-        <div className="fixed bottom-0 right-0 z-[110] w-full sm:w-[420px] h-[50vh] bg-slate-900 text-[10px] text-slate-300 font-mono p-4 border-t border-white/20 overflow-y-auto">
-          <div className="flex justify-between items-center mb-2 border-b border-white/10 pb-2">
-            <div className="space-y-1">
-              <div className="text-orange-500 font-bold">SYSTEM LOG ({VERSION})</div>
-              <div className="text-slate-500 text-[9px]">
-                CLOUD={String(canUseCloud)} / AUTH={authState} / PATH={firestorePath}
-              </div>
+    <div className="min-h-screen bg-[#F0F2F5] text-slate-900 font-sans p-4 md:p-8 flex flex-col items-center">
+      
+      {/* ヘッダーパネル */}
+      <div className="w-full max-w-2xl bg-white rounded-[2rem] shadow-2xl overflow-hidden border border-white mb-6">
+        <div className="bg-slate-900 p-6 text-white flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-xl">
+              <RefreshCcw className={`${isConnecting ? 'animate-spin' : ''}`} size={24} />
             </div>
-            <button onClick={() => setIsDebugOpen(false)}><X size={14} /></button>
+            <div>
+              <h1 className="text-xl font-black tracking-tighter italic">Cloud Sync Monitor</h1>
+              <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest">{VERSION}</p>
+            </div>
           </div>
-
-          {logs.map((l, i) => (
-            <div key={i} className="flex gap-2 border-b border-white/5 py-1">
-              <span className="text-slate-600 shrink-0 w-[84px]">{l.time}</span>
-              <span className="text-orange-400 font-bold shrink-0">{l.event}</span>
-              <span className="text-slate-300 break-all">{l.value}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Header */}
-      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-3 sm:px-6 gap-2">
-        <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
-          <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={20} /></div>
-          <h1 className="font-black text-lg tracking-tighter text-slate-800 uppercase italic hidden lg:block">Gourmet Master</h1>
+          <div className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black uppercase ${user ? 'bg-green-500/20 text-green-400' : 'bg-rose-500/20 text-rose-400 animate-pulse'}`}>
+            {user ? <CheckCircle2 size={14} /> : <Loader2 size={14} className="animate-spin" />}
+            {status}
+          </div>
         </div>
 
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-          <input
-            type="text"
-            placeholder="店名・住所・カテゴリで検索..."
-            className="w-full pl-9 pr-3 py-2.5 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold"
-            value={searchTermInput}
-            onChange={(e) => setSearchTermInput(e.target.value)}
-          />
-        </div>
-
-        <div className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border shrink-0 ${canUseCloud ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-200'}`}>
-          <Cloud size={14} className={canUseCloud ? (isSyncing ? 'text-orange-500 animate-pulse' : 'text-orange-500') : 'text-slate-400'} />
-          <span className={`text-[10px] font-black uppercase ${canUseCloud ? 'text-orange-700' : 'text-slate-500'}`}>
-            {canUseCloud ? 'Cloud' : 'Offline'}
-          </span>
-        </div>
-
-        <div className="hidden sm:flex items-center gap-2">
-          <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 transition-all" title="Import">
-            <Upload size={20} />
-            <input type="file" className="hidden" accept=".csv,.xlsx" onChange={handleFileUpload} />
-          </label>
-        </div>
-      </header>
-
-      {/* Tabs */}
-      <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-2 shadow-sm">
-        {[
-          { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> },
-          { id: 'list', label: 'LIST', icon: <Grid size={16} /> },
-          { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }
-        ].map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-6 py-5 text-[10px] font-black tracking-widest transition-all shrink-0
-              ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600 border-b-4 border-transparent'}`}
-          >
-            {tab.icon} {tab.label}
-          </button>
-        ))}
-      </nav>
-
-      <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
-        <div className="mb-10 text-center">
-          <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] mb-2 leading-none">SHARED GLOBAL DATABASE</p>
-          <h2 className="text-5xl sm:text-7xl font-black text-slate-900 italic tracking-tighter leading-none mb-3">{VERSION}</h2>
-        </div>
-
-        {data.length === 0 ? (
-          <div className="max-w-3xl mx-auto py-16 text-center bg-white p-10 rounded-[3rem] shadow-xl border border-slate-100">
-            <Database className="mx-auto text-orange-500 mb-6 opacity-20" size={80} />
-            <h2 className="text-2xl font-black mb-3 text-slate-800 tracking-tight italic uppercase">No Shared Data</h2>
-            <p className="text-sm text-slate-400 font-bold mb-8 leading-relaxed">
-              WindowsでExcelを取り込むと、iPhoneにも自動で同期されます。
+        <div className="p-6 grid grid-cols-2 gap-4 border-b bg-slate-50/50">
+          <div className="space-y-1">
+            <p className="text-[10px] font-black text-slate-400 uppercase">デバイス</p>
+            <p className="flex items-center gap-2 font-bold text-sm text-slate-700">
+              {/iPhone/i.test(navigator.userAgent) ? <Smartphone size={16} /> : <Monitor size={16} />}
+              {/iPhone/i.test(navigator.userAgent) ? "iPhone (Safari/Mobile)" : "Windows (Chrome/PC)"}
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
-              <button
-                onClick={() => saveData([{ id: `sample-${Date.now()}`, NO: 1, 店舗名: "サンプル名店", カテゴリ: "和食", 都道府県: "東京都", 住所: "銀座", isFavorite: true }])}
-                className="py-5 bg-orange-500 text-white rounded-3xl font-black shadow-xl hover:bg-orange-600 transition-all text-lg italic tracking-widest"
-              >
-                SAMPLE
-              </button>
-              <label className="py-5 border-2 border-slate-200 text-slate-700 rounded-3xl font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase">
-                IMPORT
-                <input type="file" className="hidden" accept=".csv,.xlsx" onChange={handleFileUpload} />
-              </label>
-            </div>
           </div>
-        ) : (
-          <div className="space-y-16 pb-32">
-            {activeTab === 'map' ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                {Object.keys(regions).map(reg => {
-                  const count = data.filter(Boolean).filter(d => (regions[reg] || []).includes(d.都道府県 || '')).length;
-                  return (
-                    <button
-                      key={reg}
-                      onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }}
-                      className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[200px] relative overflow-hidden active:scale-95"
-                    >
-                      <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120} /></div>
-                      <div className="relative z-10">
-                        <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] mb-1">{reg} Area</p>
-                        <h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors uppercase tracking-tighter">{reg}</h3>
-                      </div>
-                      <div className="relative z-10 mt-6 flex items-center justify-between">
-                        <span className="text-sm font-black bg-slate-50 text-slate-400 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors uppercase">
-                          {count} STORES
-                        </span>
-                        <ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" />
-                      </div>
-                    </button>
-                  );
-                })}
+          <div className="space-y-1">
+            <p className="text-[10px] font-black text-slate-400 uppercase">同期フォルダ</p>
+            <p className="flex items-center gap-2 font-bold text-[10px] text-blue-600 truncate bg-blue-50 px-2 py-1 rounded-lg">
+              <Globe size={12} /> public/data/debug_messages
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 送信フォーム */}
+      <div className="w-full max-w-2xl mb-8">
+        <form onSubmit={handleSend} className="flex gap-3 bg-white p-3 rounded-[2rem] shadow-lg border border-white">
+          <input 
+            type="text" 
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder={user ? "メッセージを入力して送信..." : "接続準備中..."}
+            className="flex-1 bg-slate-50 border-none rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-500/10 font-bold text-slate-700"
+            disabled={!user}
+          />
+          <button 
+            type="submit" 
+            disabled={!user || !inputText.trim()}
+            className="bg-blue-600 hover:bg-blue-700 text-white w-14 h-14 rounded-2xl shadow-xl flex items-center justify-center transition-all active:scale-90 disabled:opacity-30 disabled:grayscale"
+          >
+            <Send size={24} />
+          </button>
+        </form>
+        <p className="text-center text-[10px] text-slate-400 mt-3 font-bold uppercase tracking-widest">Real-time Cross-Platform Communication</p>
+      </div>
+
+      <div className="w-full max-w-2xl grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+        
+        {/* 同期データリスト */}
+        <div className="space-y-4 order-2 md:order-1">
+          <div className="flex items-center gap-2 px-2">
+            <Database size={16} className="text-blue-500" />
+            <h2 className="text-xs font-black text-slate-500 uppercase tracking-widest italic">Shared Cloud Data</h2>
+          </div>
+          <div className="space-y-3">
+            {syncData.length === 0 ? (
+              <div className="bg-white/50 border-2 border-dashed rounded-[2.5rem] p-12 text-center text-slate-300 font-bold italic">
+                データがありません。<br/>Windows側で送信してください。
               </div>
             ) : (
-              <div className="space-y-20">
-                {groupedData.map(([category, stores]) => (
-                  <div key={category} className="space-y-8">
-                    <div className="flex items-center gap-6 px-2">
-                      <h3 className="text-3xl font-black text-slate-800 flex items-center gap-4 uppercase tracking-tighter italic">
-                        <Layers size={32} className="text-orange-500" /> {category}
-                      </h3>
-                      <div className="flex-1 h-px bg-slate-200/60"></div>
-                      <span className="bg-orange-500 text-white px-6 py-2 rounded-full text-[10px] font-black shadow-lg tracking-widest">
-                        {stores.length} ITEMS
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                      {stores.map(store => (
-                        <div key={store.id} className="bg-white rounded-[3rem] shadow-sm border border-slate-200/50 overflow-hidden flex flex-col">
-                          <div className="relative h-64 overflow-hidden bg-slate-100">
-                            <img
-                              src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/500/350/gourmet,food?lock=${(store.店舗名 || '').length}`}
-                              alt={store.店舗名 || ''}
-                              className="w-full h-full object-cover"
-                            />
-                            <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90"></div>
-                            <button
-                              onClick={() => toggleFavorite(store)}
-                              className={`absolute top-6 right-6 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all
-                                ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}
-                            >
-                              <Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} />
-                            </button>
-                            <div className="absolute bottom-6 left-8 right-8 text-white pointer-events-none space-y-1">
-                              <p className="text-[10px] font-black tracking-widest uppercase opacity-70 flex items-center gap-2">
-                                <MapPin size={12} className="text-orange-400" /> {store.都道府県} • {getSubArea(store.都道府県 || '', store.住所 || '')}
-                              </p>
-                              <h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight uppercase italic">{store.店舗名}</h4>
-                            </div>
-                          </div>
-
-                          <div className="p-10 flex-1 flex flex-col justify-between gap-8 font-bold text-sm text-slate-500">
-                            <p className="line-clamp-2 leading-relaxed italic">{store.住所 || "No address provided."}</p>
-                            <div className="flex gap-4 pt-4 border-t border-slate-50">
-                              <button onClick={() => deleteData(store.id)} className="p-4 bg-slate-50 text-slate-400 hover:text-red-600 hover:bg-white rounded-2xl transition-all shadow-inner">
-                                <Trash2 size={20} />
-                              </button>
-                            </div>
-                          </div>
-
-                        </div>
-                      ))}
-                    </div>
-
+              syncData.map(item => (
+                <div key={item.id} className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100 animate-in slide-in-from-bottom-2 duration-500">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className={`text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-tighter ${item.device === 'iPhone' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                      {item.device} (ID:{item.senderId})
+                    </span>
+                    <span className="text-[9px] text-slate-300 font-mono">
+                      {item.timestamp?.toDate().toLocaleTimeString('ja-JP')}
+                    </span>
                   </div>
-                ))}
-              </div>
+                  <p className="text-slate-800 font-black text-lg">{item.text}</p>
+                </div>
+              ))
             )}
           </div>
-        )}
-      </main>
+        </div>
 
-      {/* Mobile Import */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 sm:hidden z-[80]">
-        <label className="px-6 py-4 bg-slate-900 text-white rounded-2xl font-black shadow-2xl flex items-center gap-3 active:scale-95 transition-all">
-          <Upload size={18} /> IMPORT
-          <input type="file" className="hidden" accept=".csv,.xlsx" onChange={handleFileUpload} />
-        </label>
+        {/* 詳細デバッグコンソール */}
+        <div className="space-y-4 order-1 md:order-2">
+          <div className="flex items-center gap-2 px-2">
+            <Terminal size={16} className="text-slate-500" />
+            <h2 className="text-xs font-black text-slate-500 uppercase tracking-widest italic">Debug Engine Log</h2>
+          </div>
+          <div className="bg-slate-900 rounded-[2.5rem] p-8 h-[450px] overflow-y-auto scrollbar-hide shadow-2xl border border-slate-800 font-mono">
+            {logs.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-slate-700 italic text-xs">
+                ブートログを待機中...
+              </div>
+            ) : (
+              logs.map((log, i) => (
+                <div key={i} className="flex gap-3 mb-2.5 text-[10px] leading-relaxed border-b border-white/5 pb-2.5 last:border-0">
+                  <span className="text-slate-600 shrink-0 select-none">[{log.time}]</span>
+                  <span className={`font-bold ${
+                    log.type === 'success' ? 'text-green-400' : 
+                    log.type === 'error' ? 'text-rose-400' : 
+                    log.type === 'warn' ? 'text-yellow-400' : 
+                    log.type === 'info' ? 'text-blue-300' : 'text-slate-400'
+                  }`}>
+                    {log.msg}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="w-full py-5 bg-white hover:bg-slate-100 text-slate-900 rounded-3xl text-[10px] font-black uppercase tracking-[0.2em] shadow-xl transition-all active:scale-95 border border-slate-200"
+          >
+            システム再起動
+          </button>
+        </div>
+
       </div>
+
+      <footer className="mt-16 mb-8 text-[10px] font-black text-slate-400 uppercase tracking-[0.5em] text-center leading-loose">
+        Authentication & Synchronization Resilient Engine<br/>
+        Unified Cloud Infrastructure • Gen_v3.85
+      </footer>
     </div>
   );
 };
 
+// メインの App コンポーネント (ErrorBoundary で包む)
 const App = () => (
   <ErrorBoundary>
-    <GourmetApp />
+    <AppContent />
   </ErrorBoundary>
 );
 
