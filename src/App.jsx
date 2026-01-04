@@ -12,7 +12,7 @@ import {
 import { initializeApp, getApps } from 'firebase/app';
 import { 
   getFirestore, collection, doc, setDoc, onSnapshot, 
-  deleteDoc, writeBatch, query 
+  deleteDoc, writeBatch 
 } from 'firebase/firestore';
 import { 
   getAuth, 
@@ -23,8 +23,8 @@ import {
   browserLocalPersistence
 } from 'firebase/auth';
 
-// ★ バージョン定義
-const VERSION = "Gen_v3.77-RESILIENT-SYNC";
+// ★ バージョン定義 (Gen_ プレフィックスを付与)
+const VERSION = "Gen_v3.78-SYNC-STABLE";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -35,11 +35,11 @@ class ErrorBoundary extends Component {
       return (
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center">
           <ShieldAlert size={64} className="text-rose-500 mb-6 animate-pulse" />
-          <h1 className="text-2xl font-black uppercase mb-2">System Initializer Error</h1>
+          <h1 className="text-2xl font-black uppercase tracking-tighter mb-2">System Load Error</h1>
           <div className="bg-black/50 p-6 rounded-2xl border border-rose-500/30 max-w-lg mb-8">
-            <p className="text-rose-400 font-bold text-sm break-all">{this.state.error?.message || "Failed to parse system configuration."}</p>
+            <p className="text-rose-400 font-bold text-sm break-all">{this.state.error?.message || "Failed to initialize the application."}</p>
           </div>
-          <button onClick={() => window.location.reload()} className="px-10 py-4 bg-white text-slate-900 rounded-2xl font-black uppercase">Try Again</button>
+          <button onClick={() => window.location.reload()} className="px-10 py-4 bg-white text-slate-900 rounded-2xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload App</button>
         </div>
       );
     }
@@ -58,27 +58,17 @@ const regions = {
 };
 
 const getSubArea = (pref, address = "") => {
-  if (!address) return "主要エリア";
+  if (!address) return "エリア";
   const match = address.match(/^(.*?[市郡区])/);
   return match ? match[1].replace(pref, "") : "主要";
 };
 
 // --- 1. Firebase 初期化 (安全なグローバル定義) ---
-let auth = null;
-let db = null;
-let appId = 'gourmet-master-v1';
-
-try {
-  if (typeof __firebase_config !== 'undefined') {
-    const config = JSON.parse(__firebase_config);
-    const app = getApps().length === 0 ? initializeApp(config) : getApps()[0];
-    auth = getAuth(app);
-    db = getFirestore(app);
-  }
-  if (typeof __app_id !== 'undefined') appId = __app_id;
-} catch (e) {
-  console.error("Firebase Init Crash:", e);
-}
+const firebaseConfig = JSON.parse(__firebase_config);
+const firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
 
 // --- B. アプリケーション本体 ---
 const GourmetApp = () => {
@@ -88,12 +78,11 @@ const GourmetApp = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState('map');
   const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
-  const [editingStore, setEditingStore] = useState(null);
-  const [isAddingNew, setIsAddingNew] = useState(false);
   const [logs, setLogs] = useState([]);
   const [libLoaded, setLibLoaded] = useState(false);
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
 
+  // パフォーマンス改善: 入力ラグ防止
   const [searchTermInput, setSearchTermInput] = useState('');
   const searchTerm = useDeferredValue(searchTermInput);
 
@@ -102,15 +91,14 @@ const GourmetApp = () => {
     setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 30));
   };
 
+  // 全員共有パブリックパス
   const firestorePath = ['artifacts', appId, 'public', 'data', 'stores'];
 
   // --- 認証 (Rule 3) ---
   useEffect(() => {
-    if (!auth) { setAuthChecked(true); addLog("INIT_ERROR", "Config Missing"); return; }
-
     const initAuth = async () => {
       try {
-        addLog("AUTH_STARTING");
+        addLog("AUTH_START");
         await setPersistence(auth, browserLocalPersistence);
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
@@ -118,7 +106,7 @@ const GourmetApp = () => {
           await signInAnonymously(auth);
         }
       } catch (e) {
-        addLog("AUTH_ERR", e.code);
+        addLog("AUTH_ERROR", e.code);
         setAuthChecked(true);
       }
     };
@@ -130,7 +118,7 @@ const GourmetApp = () => {
         setAuthChecked(true);
         addLog("AUTH_READY", u.uid.slice(0, 8));
       } else {
-        addLog("AUTH_DISCONNECTED");
+        addLog("AUTH_WAITING");
       }
     });
     return () => unsub();
@@ -138,10 +126,10 @@ const GourmetApp = () => {
 
   // --- 同期 (Rule 1 & Rule 3) ---
   useEffect(() => {
-    if (!user || !db) return;
+    if (!user) return;
 
     setIsSyncing(true);
-    addLog("SYNC_SUBSCRIBING");
+    addLog("SYNC_LISTEN");
     
     const storesCollection = collection(db, ...firestorePath);
     
@@ -159,7 +147,7 @@ const GourmetApp = () => {
   }, [user, reconnectTrigger]);
 
   const saveDataToCloud = async (storesToSave) => {
-    if (!user || !db) return;
+    if (!user) return;
     const safeStores = Array.isArray(storesToSave) ? storesToSave.filter(Boolean) : [];
     setIsSyncing(true);
     try {
@@ -177,8 +165,11 @@ const GourmetApp = () => {
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file || !window.XLSX) return;
-    addLog("FILE_INPUT", file.name);
+    if (!file || !window.XLSX) {
+      alert("読み込み準備中です。数秒待ってから再試行してください。");
+      return;
+    }
+    addLog("FILE_START", file.name);
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
@@ -188,7 +179,7 @@ const GourmetApp = () => {
           const name = item.店舗名 || item['店舗名'] || item['店名'] || '店舗名不明';
           const addr = item.住所 || item['住所'] || '';
           const pref = item.都道府県 || item['都道府県'] || 'その他';
-          const itemId = `${name}-${addr}-${Date.now()}-${index}`.replace(/[.#$/[\]]/g, "_");
+          const itemId = `${name}-${addr}-${index}`.replace(/[.#$/[\]]/g, "_");
           return {
             id: itemId, NO: item.NO || (data.length + index + 1), 店舗名: name,
             カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店', 都道府県: pref, 住所: addr,
@@ -205,7 +196,7 @@ const GourmetApp = () => {
   };
 
   const deleteData = async (id) => {
-    if (!user || !db || !window.confirm("削除しますか？")) return;
+    if (!user || !window.confirm("削除しますか？")) return;
     try { 
       await deleteDoc(doc(db, ...firestorePath, id));
       addLog("DELETE_OK"); 
@@ -213,7 +204,7 @@ const GourmetApp = () => {
   };
 
   const toggleFavorite = async (store) => {
-    if (!user || !db) return;
+    if (!user) return;
     try {
       await setDoc(doc(db, ...firestorePath, store.id), { isFavorite: !store.isFavorite }, { merge: true });
     } catch(e) { addLog("FAV_ERR", e.code); }
@@ -242,50 +233,54 @@ const GourmetApp = () => {
     return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
   }, [filteredData]);
 
+  // ライブラリ動的ロード
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => { setLibLoaded(true); addLog("XLSX_LOADED"); };
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_READY"); };
     document.head.appendChild(script);
   }, []);
 
   if (!authChecked) {
-    return <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-10 text-center">
-      <Loader2 className="animate-spin text-orange-500 w-16 h-16 mb-6 mx-auto" />
-      <h2 className="text-4xl font-black text-white tracking-tighter mb-2">{VERSION}</h2>
-      <p className="font-bold text-slate-400 uppercase tracking-widest text-xs">Connecting to Secure Gateway...</p>
+    return <div className="min-h-screen bg-white flex flex-col items-center justify-center p-10 text-center">
+      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4 mx-auto" />
+      <h2 className="text-3xl font-black text-slate-800 tracking-tighter mb-1">{VERSION}</h2>
+      <p className="font-bold text-slate-400 uppercase tracking-widest text-xs">Synchronizing...</p>
     </div>;
   }
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-24 sm:pb-0 relative overflow-x-hidden">
       
-      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-3 shadow-sm">
+      {/* ヘッダー: iPhone最適化 */}
+      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-2 shadow-sm">
         <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
-          <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={22} /></div>
-          <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase italic hidden lg:block leading-none">Gourmet Master</h1>
+          <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={20} /></div>
+          <h1 className="font-black text-lg tracking-tighter text-slate-800 uppercase italic hidden lg:block leading-none">Gourmet Master</h1>
         </div>
         
         <div className="flex-1 relative group">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
           <input 
             type="text" 
-            placeholder="店名や住所で自由検索..." 
-            className="w-full pl-10 pr-3 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" 
+            placeholder="検索..." 
+            className="w-full pl-9 pr-3 py-2.5 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" 
             value={searchTermInput} 
             onChange={(e) => setSearchTermInput(e.target.value)} 
           />
         </div>
         
-        {/* ステータスバッジ: iPhoneでも文字が隠れないように調整 */}
+        {/* 同期バッジ */}
         <div className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border shadow-inner shrink-0 ${user ? 'bg-orange-50 border-orange-200' : 'bg-rose-50 border-rose-200'}`}>
           {user ? <Wifi size={14} className="text-orange-500" /> : <WifiOff size={14} className="text-rose-500" />}
-          <span className={`text-[10px] font-black uppercase ${user ? 'text-orange-700' : 'text-rose-700'}`}>{user ? 'Cloud' : 'Offline'}</span>
+          <span className={`text-[10px] font-black uppercase ${user ? 'text-orange-700' : 'text-rose-700'}`}>
+            {user ? 'Cloud' : 'Offline'}
+          </span>
         </div>
 
         <div className="hidden sm:flex items-center gap-2">
-           <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 transition-all shadow-lg">
+           <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 shadow-lg">
              <Upload size={22} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
            </label>
         </div>
@@ -293,43 +288,42 @@ const GourmetApp = () => {
 
       <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-2 shadow-sm">
         {[ { id: 'map', label: 'AREA', icon: <MapIcon size={18} /> }, { id: 'list', label: 'LIST', icon: <Grid size={18} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={18} /> }].map(tab => (
-          <button key={`tab-${tab.id}`} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[11px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600 bg-orange-50/30' : 'text-slate-400 hover:text-slate-600'}`}>{tab.icon} {tab.label}</button>
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[11px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600 bg-orange-50/30' : 'text-slate-400 hover:text-slate-600'}`}>{tab.icon} {tab.label}</button>
         ))}
       </nav>
 
       <main className="max-w-7xl mx-auto p-6 md:p-10 min-h-screen">
-        {/* バージョンとステータス */}
         <div className="mb-12 text-center animate-in fade-in duration-1000">
-           <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-4">{VERSION}</h2>
-           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white' : 'bg-rose-500 text-white'}`}>
-             {user ? 'Cloud Connected: All Terminals Synced' : 'Offline Mode: Data will not be shared'}
+           <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-6">{VERSION}</h2>
+           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${user ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-rose-500 text-white'}`}>
+             {user ? 'Real-time Synchronized' : 'Local Standing Only'}
            </div>
         </div>
 
-        {/* 同期モニター: Windowsでの不具合を確認するための詳細表示 */}
+        {/* ネットワークモニター (不具合確認用) */}
         <div className="max-w-4xl mx-auto mb-16 bg-slate-900 rounded-[2.5rem] overflow-hidden shadow-2xl border border-slate-800">
           <div className="bg-slate-800 px-8 py-5 flex items-center justify-between">
             <div className="flex items-center gap-3"><Activity className="text-orange-500 animate-pulse" size={20} /><span className="text-[10px] font-black text-white uppercase tracking-widest">Global Sync Monitor</span></div>
-            <button onClick={() => setReconnectTrigger(t => t + 1)} className="px-6 py-2 bg-slate-700 hover:bg-slate-600 rounded-full transition-all active:scale-95 shadow-lg"><RotateCcw size={14} className="text-orange-400 inline mr-2" /><span className="text-[10px] text-white font-black uppercase">Force Reconnect</span></button>
+            <button onClick={() => setReconnectTrigger(t => t + 1)} className="px-4 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-full transition-all active:scale-95"><RotateCcw size={12} className="text-orange-400 inline mr-2" /><span className="text-[9px] text-white font-black uppercase">Reconnect</span></button>
           </div>
           <div className="p-8 grid grid-cols-2 sm:grid-cols-4 gap-4 text-[9px] font-black uppercase tracking-tighter text-center">
-            <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5"><p className="text-slate-500 mb-1">Session UID</p><p className="text-blue-400 truncate">{user?.uid.slice(0,12) || 'CONNECTING...'}</p></div>
-            <div className="bg-slate-800/50 p-5 rounded-2xl border border-white/5"><p className="text-slate-500 mb-1">Database Items</p><p className="text-green-400 text-xl">{data.length}</p></div>
-            <div className="bg-black/40 p-5 rounded-2xl border border-white/5 col-span-2 h-24 overflow-y-auto scrollbar-hide text-left">
-               {logs.map((l, i) => ( <div key={i} className={`flex gap-3 mb-1 border-b border-white/5 pb-1 ${l.event.includes('ERR') ? 'text-rose-400' : 'text-slate-400'}`}><span className="text-slate-600">{l.time}</span><span className="text-orange-500">{l.event}</span><span>{l.value}</span></div> ))}
+            <div className="bg-slate-800/50 p-4 rounded-2xl border border-white/5"><p className="text-slate-500 mb-1">Status</p><p className={user ? "text-green-500" : "text-rose-500"}>{user ? "CONNECTED" : "OFFLINE"}</p></div>
+            <div className="bg-slate-800/50 p-4 rounded-2xl border border-white/5"><p className="text-slate-500 mb-1">Items</p><p className="text-green-400 text-lg">{data.length}</p></div>
+            <div className="bg-black/40 p-4 rounded-2xl border border-white/5 col-span-2 h-24 overflow-y-auto scrollbar-hide text-left">
+               {logs.map((l, i) => ( <div key={i} className={`flex gap-3 mb-1 border-b border-white/5 pb-1 ${l.event.includes('ERR') ? 'text-rose-400' : 'text-slate-400'}`}><span className="text-slate-600">{l.time}</span><span className="text-orange-500 font-black">{l.event}</span></div> ))}
             </div>
           </div>
         </div>
 
         {data.length === 0 ? (
-          <div className="max-w-4xl mx-auto py-24 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
+          <div className="max-w-4xl mx-auto py-20 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={100} />
-              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase leading-none">Database Empty</h2>
-              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">Windows側でエクセルを取り込んでください。<br/>自動的に全ての端末（iPhone）に反映されます。</p>
+              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Wait for Sync</h2>
+              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">Windowsで取り込めばiPhoneにも自動表示されます。</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-lg mx-auto">
-                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"飲食店",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl tracking-widest uppercase">Sample</button>
+                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"和食",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl active:scale-95 text-xl tracking-widest uppercase">Sample</button>
                 <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase">
-                  <Upload size={24}/> Import Excel<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
+                  <Upload size={24}/> Import<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
                 </label>
               </div>
           </div>
@@ -338,7 +332,7 @@ const GourmetApp = () => {
             {activeTab === 'map' ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 animate-in fade-in duration-700">
                 {Object.keys(regions).map(reg => (
-                  <button key={`region-${reg}`} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[3rem] p-10 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[220px] relative overflow-hidden active:scale-95 text-slate-800">
+                  <button key={reg} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[3rem] p-10 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[220px] relative overflow-hidden active:scale-95 text-slate-800">
                     <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
                     <div className="relative z-10"><p className="text-[11px] font-black text-slate-300 uppercase tracking-[0.4em] mb-2">{reg} Area</p><h3 className="text-4xl font-black group-hover:text-orange-600 transition-colors uppercase tracking-tighter">{reg}</h3></div>
                     <div className="relative z-10 mt-8 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-400 px-4 py-2 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors uppercase">{data.filter(d => (regions[reg] || []).includes(d.都道府県)).length} STORES</span><ChevronRight size={28} className="text-orange-500 -translate-x-4 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
@@ -351,22 +345,22 @@ const GourmetApp = () => {
                    <div className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-xl sticky top-48 space-y-10 max-h-[70vh] overflow-y-auto scrollbar-hide">
                     <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3 border-b border-slate-50 pb-6 italic tracking-widest"><ArrowDown size={18} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
-                      <button key={`side-${category}`} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-6 py-5 bg-slate-50 text-left rounded-[2rem] text-xs font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest"><span className="truncate">{category}</span><span className="bg-white text-slate-900 px-3 py-1 rounded-xl shadow-sm font-black text-[10px]">{stores.length}</span></button>
+                      <button key={category} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-6 py-5 bg-slate-50 text-left rounded-[2rem] text-xs font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest"><span className="truncate">{category}</span><span className="bg-white text-slate-900 px-3 py-1 rounded-xl shadow-sm font-black text-[10px]">{stores.length}</span></button>
                     ))}
                   </div>
                 </aside>
                 <div className="flex-1 space-y-24 min-w-0">
                   {groupedData.map(([category, stores]) => (
-                    <div key={`section-${category}`} id={`category-section-${category}`} className="space-y-12 scroll-mt-48 animate-in fade-in duration-1000">
+                    <div key={category} id={`category-section-${category}`} className="space-y-12 scroll-mt-48 animate-in fade-in duration-1000">
                       <div className="flex items-center gap-8 px-4"><h3 className="text-3xl font-black text-slate-800 flex items-center gap-4 uppercase tracking-tighter italic"><Layers size={36} className="text-orange-500" /> {category}</h3><div className="flex-1 h-0.5 bg-slate-200/60"></div><span className="bg-orange-500 text-white px-8 py-2.5 rounded-full text-[11px] font-black shadow-lg tracking-[0.2em]">{stores.length} ITEMS</span></div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
                         {stores.map(store => (
-                          <div key={`card-${store.id}`} className="bg-white rounded-[4rem] shadow-sm border border-slate-100 hover:border-orange-200 hover:shadow-2xl transition-all duration-700 flex flex-col group relative">
+                          <div key={store.id} className="bg-white rounded-[4rem] shadow-sm border border-slate-100 hover:border-orange-200 hover:shadow-2xl transition-all duration-700 flex flex-col group relative">
                             <div className="relative h-72 overflow-hidden bg-slate-50 rounded-t-[4rem]">
                               <img src={store.imageURL || `https://loremflickr.com/600/400/gourmet,food?lock=${(store.店舗名||'').length}`} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-[2000ms]" />
                               <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/20 to-transparent opacity-90 group-hover:opacity-70 transition-opacity"></div>
                               <button onClick={() => toggleFavorite(store)} className={`absolute top-8 right-8 z-10 p-5 rounded-3xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.8] ${store.isFavorite ? 'bg-rose-500 text-white shadow-rose-500/50' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={24} fill={store.isFavorite ? "currentColor" : "none"} /></button>
-                              <div className="absolute bottom-8 left-10 right-10 text-white pointer-events-none space-y-1"><p className="text-[10px] font-black tracking-[0.3em] uppercase opacity-70 flex items-center gap-2"><MapPin size={12} className="text-orange-400" /> {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><h4 className="text-3xl font-black truncate drop-shadow-2xl italic tracking-tight uppercase">{store.店舗名}</h4></div>
+                              <div className="absolute bottom-8 left-10 right-10 text-white pointer-events-none space-y-1"><p className="text-[10px] font-black tracking-[0.3em] uppercase opacity-70 flex items-center gap-2"><MapPin size={12} className="text-orange-400" /> {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><h4 className="text-2xl font-black truncate drop-shadow-2xl italic tracking-tight uppercase">{store.店舗名}</h4></div>
                             </div>
                             <div className="p-10 flex-1 flex flex-col justify-between gap-10">
                               <p className="line-clamp-2 leading-relaxed italic text-slate-500 font-bold text-sm">{store.住所 || "No address provided."}</p>
@@ -389,7 +383,7 @@ const GourmetApp = () => {
 
       <footer className="w-full py-16 text-center text-[11px] font-black text-slate-300 uppercase tracking-[0.5em] bg-white border-t sm:hidden mb-4 px-10 leading-loose font-black italic">VER {VERSION} | ALL TERMINALS SYNCED</footer>
       
-      {/* モバイル用フローティングボタン */}
+      {/* モバイル用インポートボタン */}
       <div className="fixed bottom-10 left-1/2 -translate-x-1/2 sm:hidden z-40 flex items-center gap-4">
         <label className="bg-slate-900 text-white px-8 py-5 rounded-[2rem] font-black shadow-2xl active:scale-110 transition-all flex items-center gap-3 text-sm uppercase tracking-widest shadow-slate-400">
            <Upload size={20}/> Import Excel
