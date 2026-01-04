@@ -23,7 +23,7 @@ import {
 } from 'firebase/auth';
 
 // ★ バージョン定義 (Gen_ プレフィックスを付与)
-const VERSION = "Gen_v3.68-PUBLIC-STABLE";
+const VERSION = "Gen_v3.69-AUTO-SYNC-PRO";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -133,10 +133,10 @@ const GourmetApp = () => {
     setLogs(prev => [{ time, event, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }, ...prev].slice(0, 50));
   };
 
-  // ★ 全員共有パブリックパス（セキュリティ不要のため全端末共通）
+  // ★ 全員共有パブリックパス（全端末共通）
   const firestorePath = `artifacts/${appId}/public/data/stores`;
 
-  // 自動匿名ログイン
+  // 自動匿名ログイン (起動時に自動実行)
   useEffect(() => {
     if (!canUseCloud) { setAuthChecked(true); return; }
     const unsub = onAuthStateChanged(auth, async (u) => {
@@ -157,11 +157,11 @@ const GourmetApp = () => {
     return () => unsub();
   }, []);
 
-  // リアルタイム購読（全端末共通）
+  // リアルタイム購読 (データが更新されると自動で反映される)
   useEffect(() => {
     if (!user || !canUseCloud) return;
     setIsSyncing(true);
-    addLog("SYNC_LISTEN");
+    addLog("SYNC_START");
     const q = collection(db, firestorePath);
     const unsub = onSnapshot(q, (snap) => {
       const stores = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -188,8 +188,8 @@ const GourmetApp = () => {
           batch.set(docRef, { ...s, id: docId }, { merge: true });
         });
         await batch.commit();
-        addLog("BATCH_UPLOAD_OK");
-      } catch (e) { addLog("UPLOAD_FAIL", e.code); }
+        addLog("UPLOAD_OK");
+      } catch (e) { addLog("SAVE_ERR", e.code); }
       setIsSyncing(false);
     }
   };
@@ -294,17 +294,17 @@ const GourmetApp = () => {
   }, []);
 
   if (!authChecked) {
-    return <div className="min-h-screen bg-white flex flex-col items-center justify-center p-10">
-      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4" />
+    return <div className="min-h-screen bg-white flex flex-col items-center justify-center p-10 text-center">
+      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4 mx-auto" />
       <h2 className="text-3xl font-black text-slate-800 tracking-tighter mb-1">{VERSION}</h2>
-      <p className="font-bold text-slate-400 uppercase tracking-widest text-xs">Connecting to Cloud...</p>
+      <p className="font-bold text-slate-400 uppercase tracking-widest text-xs">Connecting to Cloud System...</p>
     </div>;
   }
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-24 sm:pb-0 relative overflow-x-hidden">
       
-      {/* 診断パネル (Bugアイコン) */}
+      {/* 診断パネルボタン */}
       <button onClick={() => setIsDebugOpen(!isDebugOpen)} className="fixed bottom-6 right-6 z-[100] p-3 bg-slate-900 text-white rounded-full opacity-20 hover:opacity-100 shadow-xl transition-all">
         <Bug size={20} />
       </button>
@@ -320,7 +320,7 @@ const GourmetApp = () => {
       )}
 
       {/* ヘッダー */}
-      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-3">
+      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-3 shadow-sm">
         <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
           <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={22} /></div>
           <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase italic hidden lg:block leading-none">Gourmet Master</h1>
@@ -364,10 +364,10 @@ const GourmetApp = () => {
       <main className="max-w-7xl mx-auto p-6 md:p-10 min-h-screen">
         {/* バージョン巨大表示 */}
         <div className="mb-16 text-center animate-in fade-in duration-1000">
-           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.6em] mb-3 leading-none">Automated Public Synchronization</p>
+           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.6em] mb-3 leading-none">Automated Real-time Sync</p>
            <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-6">{VERSION}</h2>
-           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest ${canUseCloud ? 'bg-orange-500 text-white shadow-2xl shadow-orange-200' : 'bg-slate-200 text-slate-500'}`}>
-             {canUseCloud ? 'All Devices Linked via Global Cloud' : 'Isolated Local Storage'}
+           <div className={`inline-block px-8 py-2.5 rounded-full font-black text-[11px] uppercase tracking-widest shadow-xl ${canUseCloud ? 'bg-orange-500 text-white shadow-orange-200' : 'bg-slate-200 text-slate-500'}`}>
+             {canUseCloud ? 'Shared Cloud: No Operation Required' : 'Isolated Local Storage'}
            </div>
            <div className="w-24 h-1.5 bg-orange-500 mx-auto mt-8 rounded-full shadow-lg" />
         </div>
@@ -375,14 +375,14 @@ const GourmetApp = () => {
         {data.length === 0 ? (
           <div className="max-w-4xl mx-auto py-24 text-center bg-white p-16 rounded-[4rem] shadow-2xl border border-slate-100 animate-in zoom-in duration-500">
               <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={100} />
-              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Wait for Import</h2>
+              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight italic uppercase">Wait for Sync</h2>
               <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto text-sm leading-relaxed">
                 Windowsでエクセルを取り込んでください。<br/>
-                取り込んだ瞬間にこのiPhoneにも自動表示されます。
+                取り込んだデータはこのiPhoneに自動で反映されます。
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-lg mx-auto">
-                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"飲食店",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl italic tracking-widest uppercase">Sample</button>
-                <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase">
+                <button onClick={() => saveDataToCloud([{NO:1,店舗名:"サンプル店",カテゴリ:"飲食店",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-xl italic tracking-widest uppercase">Create Sample</button>
+                <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-xl flex items-center justify-center gap-3 italic tracking-widest uppercase shadow-sm">
                   <Upload size={24}/> Import Excel<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
                 </label>
               </div>
@@ -406,7 +406,7 @@ const GourmetApp = () => {
               <div className="flex flex-col lg:flex-row gap-12 animate-in slide-in-from-bottom-10">
                 <aside className="lg:w-80 shrink-0 hidden lg:block">
                    <div className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-xl shadow-slate-200/10 sticky top-48 space-y-10 max-h-[70vh] overflow-y-auto scrollbar-hide">
-                    <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3 border-b border-slate-50 pb-6 italic"><ArrowDown size={18} className="text-orange-500" /> Genre Jump</p>
+                    <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3 border-b border-slate-50 pb-6 italic tracking-widest uppercase"><ArrowDown size={18} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
                       <button key={`side-${category}`} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-6 py-5 bg-slate-50 text-left rounded-[2rem] text-xs font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest">
                         <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-3 py-1 rounded-xl shadow-sm font-black text-[10px]">{stores.length}</span>
@@ -415,13 +415,13 @@ const GourmetApp = () => {
                   </div>
                 </aside>
                 <div className="flex-1 space-y-24 min-w-0">
-                  {groupedData.map(([category, stores]) => (
+                  {groupedData.length === 0 ? <div className="bg-white p-32 rounded-[5rem] text-center text-slate-300 font-black italic shadow-inner text-2xl uppercase tracking-widest">No Items Found</div> : groupedData.map(([category, stores]) => (
                     <div key={`section-${category}`} id={`category-section-${category}`} className="space-y-12 scroll-mt-48 animate-in fade-in duration-1000">
                       <div className="flex items-center gap-8 px-4"><h3 className="text-3xl font-black text-slate-800 flex items-center gap-4 uppercase tracking-tighter italic"><Layers size={36} className="text-orange-500" /> {category}</h3><div className="flex-1 h-0.5 bg-slate-200/60"></div><span className="bg-orange-500 text-white px-8 py-2.5 rounded-full text-[11px] font-black shadow-lg tracking-[0.2em]">{stores.length} ITEMS</span></div>
                       <div className={viewMode === 'detail' ? "grid grid-cols-1 md:grid-cols-2 gap-12" : "space-y-6"}>
                         {stores.map(store => (
-                          <div key={`card-${store.id}`} className="bg-white rounded-[4rem] shadow-sm border border-slate-200/40 overflow-hidden hover:shadow-[0_40px_80px_-20px_rgba(0,0,0,0.1)] transition-all duration-700 flex flex-col group relative">
-                            <div className="relative h-72 overflow-hidden bg-slate-50">
+                          <div key={`card-${store.id}`} className="bg-white rounded-[4rem] shadow-sm border border-slate-100 hover:border-orange-200 hover:shadow-2xl transition-all duration-700 flex flex-col group relative">
+                            <div className="relative h-72 overflow-hidden bg-slate-50 rounded-t-[4rem]">
                               <img src={store.imageURL && store.imageURL !== '' ? store.imageURL : `https://loremflickr.com/600/400/gourmet,food?lock=${(store.店舗名||'').length}`} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-[2000ms]" />
                               <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/20 to-transparent opacity-90 group-hover:opacity-70 transition-opacity"></div>
                               <button onClick={() => toggleFavorite(store)} className={`absolute top-8 right-8 z-10 p-5 rounded-3xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.8] ${store.isFavorite ? 'bg-rose-500 text-white shadow-rose-500/50' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={24} fill={store.isFavorite ? "currentColor" : "none"} /></button>
@@ -453,7 +453,7 @@ const GourmetApp = () => {
 
       {/* モバイル用インポートボタン */}
       <div className="fixed bottom-10 left-1/2 -translate-x-1/2 sm:hidden z-40 flex items-center gap-4">
-        <label className="bg-slate-900 text-white px-8 py-5 rounded-[2rem] font-black shadow-2xl active:scale-110 transition-all flex items-center gap-3 text-sm uppercase tracking-widest">
+        <label className="bg-slate-900 text-white px-8 py-5 rounded-[2rem] font-black shadow-2xl active:scale-110 transition-all flex items-center gap-3 text-sm uppercase tracking-widest shadow-slate-400">
            <Upload size={20}/> Import Excel
            <input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
         </label>
