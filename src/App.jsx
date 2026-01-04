@@ -4,7 +4,7 @@ import {
   Upload, Trash2, Edit2, X, Store, Heart, Save, FileSpreadsheet, 
   FileText, Loader2, Map as MapIcon, Grid, Database, RefreshCw, 
   ChevronRight, PieChart, Info, Trash, Layers, ArrowDown, Layout, List, 
-  ChevronDown, ChevronUp, Navigation, Image as ImageIcon, Star, Cloud, AlertCircle, Copy, RefreshCcw
+  ChevronDown, ChevronUp, Navigation, Image as ImageIcon, Star, Cloud, AlertCircle, Copy, RefreshCcw, ShieldAlert
 } from 'lucide-react';
 
 // Firebase SDK インポート
@@ -18,11 +18,12 @@ import {
   onAuthStateChanged, 
   GoogleAuthProvider,
   signInWithRedirect,
-  signInWithPopup, // 追加
+  signInWithPopup,
   getRedirectResult
 } from 'firebase/auth';
 
-console.log("### UI-REFINE CHECK v3.13 (Mobile Popup Fix) ###");
+const VERSION = "v3.16-FINAL-RECOVERY";
+console.log(`### UI-REFINE CHECK ${VERSION} ###`);
 
 // --- 0. 定数定義 ---
 const PREF_ORDER = [
@@ -78,12 +79,12 @@ const getSubArea = (pref, address = "") => {
   return match ? match[0].replace(pref, "") : "主要エリア";
 };
 
-// --- 1. Firebase 設定取得ロジック ---
+// --- 1. Firebase 設定取得 (クラッシュ防止設計) ---
 const getFirebaseConfig = () => {
-  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-    return { firebaseConfig: JSON.parse(__firebase_config), isEnvConfig: true };
-  }
   try {
+    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+      return { firebaseConfig: JSON.parse(__firebase_config), isEnvConfig: true };
+    }
     const env = import.meta.env;
     if (env && env.VITE_FIREBASE_API_KEY) {
       return {
@@ -98,13 +99,13 @@ const getFirebaseConfig = () => {
         isEnvConfig: true
       };
     }
-  } catch (e) {}
-
+  } catch (e) {
+    console.warn("Config parsing error:", e);
+  }
   return { firebaseConfig: null, isEnvConfig: false };
 };
 
 const { firebaseConfig, isEnvConfig } = getFirebaseConfig();
-// デバッグ: appIdの混在を防ぐためここで確定
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
 
 let firebaseApp = null;
@@ -112,14 +113,29 @@ let auth = null;
 let db = null;
 
 if (isEnvConfig && firebaseConfig?.apiKey) {
-  firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-  auth = getAuth(firebaseApp);
-  db = getFirestore(firebaseApp);
+  try {
+    firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+  } catch (e) {
+    console.error("Firebase Init Error:", e);
+  }
 }
 
 const canUseCloud = Boolean(isEnvConfig && auth && db);
 
+// iPadOSを含むモバイル判定
+const checkIsMobile = () => {
+  if (typeof navigator === 'undefined') return false;
+  if (navigator.userAgentData?.mobile) return true;
+  const ua = navigator.userAgent;
+  const isIPadOS = (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua));
+  const isCommonMobile = /iPhone|iPod|Android/i.test(ua);
+  return isCommonMobile || isIPadOS;
+};
+
 const App = () => {
+  // --- A. 全State定義 (コンパイルエラー防止) ---
   const [data, setData] = useState([]);
   const [user, setUser] = useState(null);
   const [cloudMode, setCloudMode] = useState(canUseCloud);
@@ -127,17 +143,30 @@ const App = () => {
   const [fsError, setFsError] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [libLoaded, setLibLoaded] = useState(false);
-  const [syncTrigger, setSyncTrigger] = useState(0); // 強制再同期用
+  const [syncTrigger, setSyncTrigger] = useState(0); 
+  const [needsLogin, setNeedsLogin] = useState(false);
+  
+  // フィルタ/表示用State
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedRegion, setSelectedRegion] = useState('全国');
+  const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
+  const [selectedSubArea, setSelectedSubArea] = useState('すべて');
+  const [selectedCategory, setSelectedCategory] = useState('すべて');
+  const [viewMode, setViewMode] = useState('detail'); 
+  const [activeTab, setActiveTab] = useState('map'); 
+  const [editingStore, setEditingStore] = useState(null);
+  const [isAddingNew, setIsAddingNew] = useState(false);
 
-  // Firestoreパスの計算
+  const isMobileDevice = useMemo(() => checkIsMobile(), []);
   const firestorePath = user?.uid ? `artifacts/${appId}/users/${user.uid}/stores` : 'N/A';
 
+  // --- 統計・フィルタ用Memo ---
   const stats = useMemo(() => {
     const res = { regions: {}, prefs: {}, subAreas: {}, total: data.length };
     data.forEach(item => {
-      const r = getRegionFromPref(item.都道府県);
-      const p = item.都道府県;
-      const s = getSubArea(p, item.住所);
+      const r = getRegionFromPref(item.都道府県 || '');
+      const p = item.都道府県 || '';
+      const s = getSubArea(p, item.住所 || '');
       res.regions[r] = (res.regions[r] || 0) + 1;
       res.prefs[p] = (res.prefs[p] || 0) + 1;
       if (p === selectedPrefecture || selectedPrefecture === 'すべて') {
@@ -147,6 +176,42 @@ const App = () => {
     return res;
   }, [data, selectedPrefecture]);
 
+  const filteredData = useMemo(() => {
+    let result = data;
+    if (activeTab === 'favorites') result = result.filter(item => item.isFavorite);
+    if (searchTerm) {
+      const t = searchTerm.toLowerCase();
+      result = result.filter(item => 
+        (item.店舗名 || '').toLowerCase().includes(t) || 
+        (item.住所 || '').toLowerCase().includes(t)
+      );
+    }
+    if (selectedRegion !== '全国') {
+      result = result.filter(item => getRegionFromPref(item.都道府県) === selectedRegion);
+    }
+    if (selectedPrefecture !== 'すべて') {
+      result = result.filter(item => item.都道府県 === selectedPrefecture);
+    }
+    if (selectedSubArea !== 'すべて') {
+      result = result.filter(item => getSubArea(item.都道府県, item.住所) === selectedSubArea);
+    }
+    if (selectedCategory !== 'すべて') {
+      result = result.filter(item => item.カテゴリ === selectedCategory);
+    }
+    return result;
+  }, [data, searchTerm, selectedRegion, selectedPrefecture, selectedSubArea, selectedCategory, activeTab]);
+
+  const groupedData = useMemo(() => {
+    const groups = {};
+    filteredData.forEach(item => {
+      const cat = item.カテゴリ || '未分類';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(item);
+    });
+    return Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+  }, [filteredData]);
+
+  // --- 2. XLSX 読み込み ---
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
@@ -156,85 +221,71 @@ const App = () => {
     return () => { if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // --- 3. 認証処理 ---
+  // --- 3. 認証処理 (D, E対応) ---
   useEffect(() => {
     let unsubAuth = null;
     let isMounted = true;
 
     if (cloudMode && canUseCloud) {
-      if (!auth || !db) {
-        if (isMounted) {
-          setAuthError("Firebase設定が不完全なため、ローカルモードへ切り替えました。");
-          setUser({ uid: 'local-user' });
-        }
-        return;
-      }
+      // リダイレクト結果の確認
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result?.user && isMounted) console.log("Login success via redirect");
+        })
+        .catch((err) => {
+          console.error("Redirect Error:", err.code);
+          if (isMounted) {
+            setAuthError(`ログイン失敗: ${err.code}`);
+            setNeedsLogin(true); // エラー時はログイン画面へ戻す
+          }
+        });
 
       unsubAuth = onAuthStateChanged(auth, (u) => { 
         if (!isMounted) return;
         if (!u) {
-          console.log("No User Session. Waiting for login...");
-          setUser({ uid: 'local-user' });
+          setNeedsLogin(true); // ユーザーがいない場合はボタンを表示
           return;
         }
         console.log("Auth Active - UID:", u.uid);
+        setNeedsLogin(false);
         setUser(u); 
       });
-
-      const handleSignIn = async () => {
-        try {
-          await getRedirectResult(auth);
-          if (!auth.currentUser && isMounted) {
-            console.log("User not found. Initiating Login...");
-            const provider = new GoogleAuthProvider();
-            
-            // モバイルブラウザ判定 (navigator.userAgent)
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            
-            if (isMobile) {
-              console.log("Mobile device detected. Using signInWithPopup.");
-              await signInWithPopup(auth, provider);
-            } else {
-              console.log("Desktop device detected. Using signInWithRedirect.");
-              await signInWithRedirect(auth, provider);
-            }
-          }
-        } catch (err) {
-          if (err.code === 'auth/unauthorized-domain') {
-            const host = window.location.hostname || "current-domain";
-            if (isMounted) {
-              setCloudMode(false);
-              setAuthError(`ドメイン[${host}]が許可されていません。Firebase設定が必要です。`);
-              setUser({ uid: 'local-user' });
-            }
-          } else {
-            if (isMounted && !auth.currentUser) {
-              setCloudMode(false);
-              setAuthError(`認証エラー (${err.code})`);
-              setUser({ uid: 'local-user' });
-            }
-          }
-        }
-      };
-      handleSignIn();
     } else {
-      if (isMounted) setUser({ uid: 'local-user' });
+      if (isMounted) {
+        setNeedsLogin(false);
+        setUser({ uid: 'local-user' });
+      }
     }
 
-    return () => {
-      isMounted = false;
-      if (typeof unsubAuth === "function") unsubAuth();
-    };
+    return () => { isMounted = false; if (typeof unsubAuth === "function") unsubAuth(); };
   }, [cloudMode, syncTrigger]);
 
-  // --- 4. データ同期 (canUseCloud 併用による安全化) ---
+  const startLogin = async () => {
+    if (!auth) return;
+    const provider = new GoogleAuthProvider();
+    setAuthError(null);
+    try {
+      if (isMobileDevice) {
+        // モバイルは Redirect
+        await signInWithRedirect(auth, provider);
+      } else {
+        // PCは Popup
+        await signInWithPopup(auth, provider);
+      }
+    } catch (err) {
+      console.error("Auth Start Error:", err.code);
+      setAuthError(`認証開始失敗: ${err.code}`);
+      setNeedsLogin(true);
+    }
+  };
+
+  // --- 4. データ同期 (onSnapshot) ---
   useEffect(() => {
     if (!user || user.uid === 'local-user') {
       loadLocalData();
       return;
     }
     let unsubSnapshot = null;
-    
     if (canUseCloud && cloudMode && db) {
       setIsSyncing(true);
       const storesCol = collection(db, 'artifacts', appId, 'users', user.uid, 'stores');
@@ -254,10 +305,7 @@ const App = () => {
     } else {
       loadLocalData();
     }
-    
-    return () => {
-      if (typeof unsubSnapshot === "function") unsubSnapshot();
-    };
+    return () => { if (typeof unsubSnapshot === "function") unsubSnapshot(); };
   }, [user, cloudMode, syncTrigger]);
 
   const loadLocalData = () => {
@@ -265,23 +313,12 @@ const App = () => {
     if (saved) { try { setData(JSON.parse(saved)); } catch (e) {} }
   };
 
-  const copyToClipboard = (text) => {
-    const el = document.createElement('textarea');
-    el.value = text;
-    document.body.appendChild(el);
-    el.select();
-    document.execCommand('copy');
-    document.body.removeChild(el);
-    alert("コピーしました: " + text);
-  };
-
-  // --- 書き込み処理 (Error Handling 強化) ---
+  // --- CRUD 処理 ---
   const saveData = async (storesToSave) => {
     const newDataMap = new Map(data.map(item => [item.id, item]));
     storesToSave.forEach(store => {
       const docId = store.id || `${store.店舗名}-${store.住所}`.replace(/[.#$/[\]]/g, "_");
-      const existing = newDataMap.get(docId);
-      newDataMap.set(docId, { ...existing, ...store, id: docId });
+      newDataMap.set(docId, { ...store, id: docId });
     });
     const allData = Array.from(newDataMap.values());
 
@@ -291,10 +328,9 @@ const App = () => {
         for (const store of storesToSave) {
           const docId = store.id || `${store.店舗名}-${store.住所}`.replace(/[.#$/[\]]/g, "_");
           const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'stores', docId);
-          const payload = { ...store, id: docId };
-          await setDoc(docRef, payload, { merge: true });
+          await setDoc(docRef, { ...store, id: docId }, { merge: true });
         }
-      } catch (e) { 
+      } catch (e) {
         console.error("Save Error:", e);
         setFsError(`保存失敗 (理由: ${e.code})`);
       }
@@ -310,10 +346,7 @@ const App = () => {
     if (canUseCloud && cloudMode && db && user && user.uid !== 'local-user') {
       try {
         await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'stores', id));
-      } catch (e) { 
-        console.error("Delete Error:", e);
-        setFsError(`削除失敗 (理由: ${e.code})`);
-      }
+      } catch (e) { setFsError(`削除失敗 (理由: ${e.code})`); }
     } else {
       const filtered = data.filter(item => item.id !== id);
       setData(filtered);
@@ -326,15 +359,21 @@ const App = () => {
       try {
         const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'stores', store.id);
         await setDoc(docRef, { isFavorite: !store.isFavorite }, { merge: true });
-      } catch (e) {
-        console.error("Favorite Error:", e);
-        setFsError(`お気に入り更新失敗 (理由: ${e.code})`);
-      }
+      } catch (e) { setFsError(`お気に入り更新失敗 (理由: ${e.code})`); }
     } else {
       const updated = data.map(item => item.id === store.id ? { ...item, isFavorite: !item.isFavorite } : item);
       setData(updated);
       localStorage.setItem('gourmetStores', JSON.stringify(updated));
     }
+  };
+
+  // --- ヘルパー ---
+  const copyToClipboard = (text) => {
+    const el = document.createElement('textarea');
+    el.value = text;
+    document.body.appendChild(el); el.select();
+    document.execCommand('copy'); document.body.removeChild(el);
+    alert("コピーしました");
   };
 
   const handleFileUpload = (event) => {
@@ -345,22 +384,16 @@ const App = () => {
       try {
         const workbook = window.XLSX.read(e.target.result, { type: 'array' });
         const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-        const normalized = jsonData.map((item, index) => {
-          const name = item.店舗名 || item['店舗名'] || '';
-          const addr = item.住所 || item['住所'] || '';
-          const pref = item.都道府県 || item['都道府県'] || '';
-          const docId = `${name}-${addr}`.replace(/[.#$/[\]]/g, "_");
-          return {
-            id: docId,
-            NO: item.NO || item['NO'] || (data.length + index + 1),
-            店舗名: name,
-            カテゴリ: item.カテゴリ || item['カテゴリ'] || '飲食店',
-            都道府県: pref,
-            住所: addr,
-            URL: item.URL || item['URL'] || '',
-            isFavorite: false
-          };
-        });
+        const normalized = jsonData.map((item, index) => ({
+          id: `${item.店舗名}-${item.住所}`.replace(/[.#$/[\]]/g, "_"),
+          NO: item.NO || (data.length + index + 1),
+          店舗名: item.店舗名 || '',
+          カテゴリ: item.カテゴリ || '飲食店',
+          都道府県: item.都道府県 || '',
+          住所: item.住所 || '',
+          URL: item.URL || '',
+          isFavorite: false
+        }));
         saveData(normalized);
         setActiveTab('list');
       } catch (err) { alert("Excel 解析失敗"); }
@@ -378,50 +411,70 @@ const App = () => {
     if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.pageYOffset - 180, behavior: 'smooth' });
   };
 
+  // --- 画面表示制御 ---
   if (!user) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-white">
-        <Loader2 className="animate-spin text-orange-500 w-12 h-12" />
-        <p className="mt-4 font-black text-slate-400 uppercase tracking-tighter text-[10px]">Connecting...</p>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 text-center font-sans">
+        {needsLogin ? (
+          <div className="animate-in fade-in duration-700 max-w-sm">
+            <div className="bg-orange-500 p-5 rounded-[2.5rem] text-white shadow-2xl shadow-orange-200 mb-8 inline-block">
+              <Store size={40} />
+            </div>
+            <h2 className="text-3xl font-black text-slate-800 mb-2 tracking-tighter uppercase">Gourmet Master</h2>
+            <p className="text-slate-400 font-bold mb-10 text-sm leading-relaxed">美食リストをクラウドで同期・管理します。</p>
+            {authError && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-2xl text-xs font-bold border border-rose-100 flex items-center gap-2"><ShieldAlert size={16}/> {authError}</div>}
+            <button onClick={startLogin} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black shadow-2xl hover:bg-slate-800 transition-all flex items-center justify-center gap-3 text-lg">
+              <Cloud size={24} /> Googleでログイン
+            </button>
+            <button onClick={() => { setCloudMode(false); setUser({uid: 'local-user'}); }} className="mt-8 text-xs font-black text-slate-300 hover:text-orange-500 transition-colors tracking-widest uppercase">ログインせずに利用する</button>
+          </div>
+        ) : (
+          <>
+            <Loader2 className="animate-spin text-orange-500 w-12 h-12" />
+            <p className="mt-4 font-black text-slate-400 uppercase tracking-tighter text-[10px]">Connecting...</p>
+          </>
+        )}
+        {/* Debug Footer */}
+        <div className="fixed bottom-4 text-[9px] text-slate-300 font-mono">
+          HOST: {window.location.hostname} | CONFIG: {isEnvConfig ? "OK" : "NONE"} | VERSION: {VERSION}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100">
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative">
       
-      {/* デバッグ情報オーバーレイ (デスクトップのみ) */}
-      <div className="hidden xl:block fixed top-24 right-6 z-[60] bg-slate-900/90 backdrop-blur text-white p-4 rounded-2xl shadow-2xl text-[10px] font-mono border border-white/10 space-y-2">
+      {/* C. デバッグパネル (常時表示) */}
+      <div className="fixed top-24 right-6 z-[60] bg-slate-900/95 backdrop-blur text-white p-4 rounded-2xl shadow-2xl text-[10px] font-mono border border-white/10 space-y-2 hidden xl:block">
         <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-2 mb-2">
-          <span className="font-bold text-orange-400 uppercase tracking-widest">Debug Console</span>
-          <button onClick={() => setSyncTrigger(t => t + 1)} className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded hover:bg-orange-500 transition-colors">
-            <RefreshCcw size={10} /> FORCE RESYNC
-          </button>
+          <span className="font-bold text-orange-400 uppercase">DEBUG PANEL ({VERSION})</span>
+          <button onClick={() => setSyncTrigger(t => t + 1)} className="p-1 hover:bg-orange-500 rounded transition-colors"><RefreshCcw size={12} /></button>
         </div>
         <div className="grid grid-cols-[60px,1fr] gap-x-2">
+          <span className="text-slate-500">HOST:</span><span>{window.location.hostname}</span>
+          <span className="text-slate-500">AUTH:</span><span>{firebaseConfig?.authDomain || "NONE"}</span>
           <span className="text-slate-500">MODE:</span><span className={canUseCloud && cloudMode ? "text-green-400" : "text-amber-400"}>{canUseCloud && cloudMode ? "CLOUD (Firestore)" : "LOCAL (Storage)"}</span>
-          <span className="text-slate-500">APP ID:</span><span>{appId}</span>
           <span className="text-slate-500">UID:</span><span className="select-all">{user.uid}</span>
-          <span className="text-slate-500">COUNT:</span><span>{data.length} items</span>
         </div>
-        <div className="mt-2 pt-2 border-t border-white/10 flex flex-col gap-1">
+        <div className="pt-2 border-t border-white/10">
           <span className="text-slate-500">DB PATH:</span>
-          <div className="flex items-center gap-1 bg-black/40 p-2 rounded break-all">
-            <span>{firestorePath}</span>
-            <button onClick={() => copyToClipboard(firestorePath)} className="shrink-0 p-1 hover:text-orange-400 transition-colors"><Copy size={12}/></button>
+          <div className="flex items-center gap-1 bg-black/40 p-1.5 rounded mt-1 overflow-hidden">
+             <span className="truncate flex-1">{firestorePath}</span>
+             <button onClick={() => copyToClipboard(firestorePath)} className="p-1 hover:text-orange-400 transition-colors"><Copy size={12}/></button>
           </div>
         </div>
       </div>
 
       <div className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200 shadow-sm">
         <header className="max-w-7xl mx-auto px-4 h-16 md:h-20 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 shrink-0 cursor-pointer group" onClick={() => {setSelectedRegion('全国'); setSelectedPrefecture('すべて'); setSelectedSubArea('すべて'); setActiveTab('map');}}>
-            <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg shadow-orange-100 group-hover:scale-105 transition-transform"><Store size={22} /></div>
+          <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => {setSelectedRegion('全国'); setSelectedPrefecture('すべて'); setActiveTab('map');}}>
+            <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={24} /></div>
             <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase hidden md:block">Gourmet<span className="text-orange-500">Master</span></h1>
           </div>
           <div className="flex-1 max-w-xl relative group">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-orange-500 transition-colors" size={18} />
-            <input type="text" placeholder="店名、住所、メモを検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+            <input type="text" placeholder="店名、住所、カテゴリで検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm md:text-base outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <div className="flex items-center gap-3">
              <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}>
@@ -443,17 +496,13 @@ const App = () => {
           </nav>
           {(activeTab === 'list' || activeTab === 'favorites') && (
             <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto scrollbar-hide">
-              <select value={selectedRegion} onChange={(e) => { setSelectedRegion(e.target.value); setSelectedPrefecture('すべて'); setSelectedSubArea('すべて'); }} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black outline-none focus:ring-2 focus:ring-orange-500/20 shrink-0 cursor-pointer min-w-[100px]">
+              <select value={selectedRegion} onChange={(e) => { setSelectedRegion(e.target.value); setSelectedPrefecture('すべて'); setSelectedSubArea('すべて'); }} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black outline-none shrink-0 cursor-pointer">
                 <option value="全国">全国 ({stats.total})</option>
                 {Object.entries(stats.regions).map(([name, count]) => <option key={name} value={name}>{name} ({count})</option>)}
               </select>
-              <select value={selectedPrefecture} onChange={(e) => {setSelectedPrefecture(e.target.value); setSelectedSubArea('すべて');}} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black outline-none focus:ring-2 focus:ring-orange-500/20 shrink-0 cursor-pointer min-w-[100px]">
+              <select value={selectedPrefecture} onChange={(e) => {setSelectedPrefecture(e.target.value); setSelectedSubArea('すべて');}} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black outline-none shrink-0 cursor-pointer">
                 <option value="すべて">都道府県</option>
                 {PREF_ORDER.map(p => (stats.prefs[p] || 0) > 0 && <option key={p} value={p}>{p} ({stats.prefs[p]})</option>)}
-              </select>
-              <select value={selectedSubArea} onChange={(e) => setSelectedSubArea(e.target.value)} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black outline-none focus:ring-2 focus:ring-orange-500/20 shrink-0 cursor-pointer min-w-[100px]">
-                <option value="すべて">詳細地域</option>
-                {Object.entries(stats.subAreas).map(([name, count]) => <option key={name} value={name}>{name} ({count})</option>)}
               </select>
               <div className="flex p-1 bg-slate-100 rounded-xl ml-2 shrink-0">
                 <button onClick={() => setViewMode('detail')} className={`p-2 rounded-lg transition-all ${viewMode === 'detail' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400'}`}><Layout size={14}/></button>
@@ -466,85 +515,73 @@ const App = () => {
 
       <main className="max-w-7xl mx-auto p-4 md:p-8">
         {(authError || fsError) && (
-          <div className="mb-6 bg-rose-50 border border-rose-100 text-rose-600 px-5 py-4 rounded-3xl flex items-center justify-between text-sm font-bold shadow-sm animate-in slide-in-from-top duration-300">
+          <div className="mb-6 bg-rose-50 border border-rose-100 text-rose-600 px-5 py-4 rounded-3xl flex items-center justify-between text-sm font-bold shadow-sm animate-in slide-in-from-top">
              <div className="flex items-center gap-3"><AlertCircle size={20} /><span>{authError || fsError}</span></div>
-             <button onClick={() => { setAuthError(null); setFsError(null); }} className="hover:bg-rose-200/50 p-1 rounded-xl transition-colors"><X size={18}/></button>
+             <button onClick={() => { setAuthError(null); setFsError(null); }} className="hover:bg-rose-200/50 p-1 rounded-xl"><X size={18}/></button>
           </div>
         )}
 
-        {data.length === 0 ? (
-          <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 md:p-24 rounded-[4rem] shadow-xl shadow-slate-200/40 border border-slate-100 animate-in fade-in zoom-in duration-700">
-              <div className="bg-orange-50 w-28 h-28 rounded-[2.5rem] flex items-center justify-center mx-auto mb-10 rotate-6 group-hover:rotate-0 transition-transform">
-                <Database className="text-orange-500 opacity-30" size={60} />
-              </div>
-              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight">美食リストをインポート</h2>
-              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto leading-relaxed">ExcelやCSVファイルを読み込むだけで、あなただけのグルメモリーが完成します。データは全デバイスで同期されます。</p>
+        {!libLoaded ? (
+          <div className="py-40 text-center"><Loader2 className="animate-spin mx-auto text-orange-500 mb-4" size={48} /><p className="font-black text-slate-400 tracking-widest">LOADING ENGINE...</p></div>
+        ) : data.length === 0 ? (
+          <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100 animate-in zoom-in duration-700">
+              <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={80} />
+              <h2 className="text-4xl font-black mb-6 text-slate-800 tracking-tight">リストをインポートしましょう</h2>
+              <p className="text-slate-400 mb-12 font-bold max-w-sm mx-auto leading-relaxed">ExcelやCSVファイルを読み込むだけで、自分だけのグルメモリーが完成します。</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
-                <button onClick={() => saveData([{id:'sample-1',店舗名:"サンプル名店 銀座",住所:"東京都中央区銀座1-1-1",カテゴリ:"和食",都道府県:"東京都",isFavorite:true,NO:1}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl shadow-orange-200 hover:bg-orange-600 hover:-translate-y-1 transition-all active:scale-95 text-lg">サンプル生成</button>
-                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 hover:border-slate-300 transition-all text-lg text-center flex items-center justify-center gap-2">ファイルを読込<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
+                <button onClick={() => saveData([{id:'sample-1',店舗名:"サンプル名店 銀座",住所:"東京都中央区銀座1-1-1",カテゴリ:"和食",都道府県:"東京都",isFavorite:true,NO:1}])} className="py-5 bg-orange-500 text-white rounded-[2rem] font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg">サンプル生成</button>
+                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-[2rem] font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2">ファイルを読込<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
               </div>
-          </div>
-        ) : filteredData.length === 0 ? (
-          <div className="max-w-2xl mx-auto py-24 text-center bg-white p-12 rounded-[4rem] shadow-sm border border-slate-100 flex flex-col items-center animate-in fade-in duration-500">
-            <div className="p-8 bg-slate-50 rounded-full mb-8"><Search size={64} className="text-slate-200" /></div>
-            <h3 className="text-2xl font-black text-slate-800 mb-4">一致するお店が見つかりませんでした</h3>
-            <p className="text-slate-400 font-bold mb-10">条件をリセットするか、新しい店舗を追加してみましょう。</p>
-            <div className="flex gap-4">
-              <button onClick={() => { setSelectedRegion('全国'); setSelectedPrefecture('すべて'); setSelectedSubArea('すべて'); setSearchTerm(''); }} className="px-10 py-4 bg-slate-100 text-slate-600 rounded-2xl font-black hover:bg-slate-200 transition-all">検索をクリア</button>
-              <button onClick={() => setIsAddingNew(true)} className="px-10 py-4 bg-orange-500 text-white rounded-2xl font-black shadow-lg shadow-orange-100 hover:bg-orange-600 transition-all">新規登録</button>
-            </div>
           </div>
         ) : (
           <div className="space-y-16 animate-in fade-in duration-700">
             {activeTab === 'map' && (
               <div className="space-y-10">
-                <h2 className="text-3xl md:text-4xl font-black text-slate-800 flex items-center gap-4 italic tracking-tighter uppercase">Explore<span className="text-orange-500">Areas</span></h2>
+                <h2 className="text-4xl font-black text-slate-800 flex items-center gap-4 italic tracking-tighter uppercase">Explore<span className="text-orange-500">Areas</span></h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                   {Object.keys(regions).map(reg => {
-                    const count = stats.regions[reg] || 0;
+                    const count = data.filter(d => (regions[reg] || []).includes(d.都道府県)).length;
                     if (count === 0 && reg !== '関東') return null;
                     return (
-                      <button key={reg} onClick={() => { setSelectedRegion(reg); setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl hover:border-orange-500 transition-all flex flex-col justify-between min-h-[190px] relative overflow-hidden active:scale-95">
+                      <button key={reg} onClick={() => { setSelectedRegion(reg); setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[190px] relative overflow-hidden active:scale-95">
                         <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:opacity-10 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
                         <div className="relative z-10"><p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-1">{reg} Area</p><h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors">{reg}</h3></div>
-                        <div className="relative z-10 mt-6 flex items-center justify-between">
-                          <span className="text-sm font-black bg-slate-50 text-slate-500 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors">{count} 店の登録</span>
-                          <ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" />
-                        </div>
+                        <div className="relative z-10 mt-6 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-500 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors">{count} 店</span><ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
                       </button>
                     );
                   })}
                 </div>
               </div>
             )}
+            
             {(activeTab === 'list' || activeTab === 'favorites') && (
               <div className="flex flex-col lg:flex-row gap-10">
                 <aside className="lg:w-72 shrink-0 hidden lg:block space-y-8">
-                   <div className="bg-white p-7 rounded-[3rem] border border-slate-200/60 shadow-sm sticky top-44 space-y-7">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><ArrowDown size={14} className="text-orange-500" /> ジャンル別</p>
-                    <div className="flex flex-col gap-2 max-h-[50vh] overflow-y-auto scrollbar-hide pr-1">
+                   <div className="bg-white p-7 rounded-[3rem] border border-slate-200/60 shadow-sm sticky top-44 space-y-7 max-h-[70vh] overflow-y-auto scrollbar-hide">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b pb-4"><ArrowDown size={14} className="text-orange-500" /> ジャンル別</p>
+                    <div className="flex flex-col gap-2">
                       {groupedData.map(([category, stores]) => (
-                        <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-3.5 bg-slate-50 text-left rounded-2xl text-xs font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group border border-transparent hover:border-orange-100 active:scale-95">
-                          <span className="truncate">{category}</span><span className="text-[10px] bg-white text-slate-900 px-2.5 py-0.5 rounded-lg font-black group-hover:bg-orange-100 shadow-sm">{stores.length}</span>
+                        <button key={category} onClick={() => scrollToCategory(category)} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-xs font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95">
+                          <span className="truncate">{category}</span><span className="text-[10px] bg-white text-slate-900 px-2.5 py-1 rounded-lg font-black group-hover:bg-orange-100 shadow-sm">{stores.length}</span>
                         </button>
                       ))}
                     </div>
                   </div>
                 </aside>
                 <div className="flex-1 space-y-16">
-                  {groupedData.map(([category, stores]) => (
-                    <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4 duration-500">
-                      <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black uppercase shadow-lg shadow-orange-100">{stores.length} 件</span></div>
-                      <div className={viewMode === 'detail' ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8" : "space-y-3"}>
+                  {groupedData.length === 0 ? <div className="bg-white p-20 rounded-[3rem] text-center text-slate-300 font-black italic shadow-inner">お店が見つかりませんでした</div> : groupedData.map(([category, stores]) => (
+                    <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4">
+                      <div className="flex items-center gap-5 px-2"><h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter"><Layers size={26} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
+                      <div className={viewMode === 'detail' ? "grid grid-cols-1 sm:grid-cols-2 gap-8" : "space-y-3"}>
                         {stores.map(store => (
                           viewMode === 'detail' ? (
                             <div key={store.id} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
-                              <div className="relative h-60 overflow-hidden bg-slate-100"><img src={getStoreImage(store)} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" /><div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60 transition-opacity"></div><button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button><div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest">{getRegionFromPref(store.都道府県)}</span><span className="px-2 py-0.5 bg-white/20 backdrop-blur rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight">{store.店舗名}</h4></div></div>
-                              <div className="p-8 flex-1 flex flex-col"><div className="space-y-4 text-sm flex-1 font-bold"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black mt-2"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1 group-hover/link:-translate-y-1"/><span className="truncate text-sm">詳しく見る</span></a>)}</div><div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black shadow-inner"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
+                              <div className="relative h-60 overflow-hidden bg-slate-100"><img src={getStoreImage(store)} alt={store.店舗名} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" /><div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-slate-900/10 to-transparent opacity-90 group-hover:opacity-60"></div><button onClick={() => toggleFavorite(store)} className={`absolute top-5 right-5 z-10 p-4 rounded-2xl backdrop-blur-md shadow-2xl transition-all active:scale-[1.5] ${store.isFavorite ? 'bg-rose-500 text-white' : 'bg-white/90 text-slate-300 hover:text-rose-500'}`}><Heart size={20} fill={store.isFavorite ? "currentColor" : "none"} /></button><div className="absolute bottom-6 left-7 right-7 text-white pointer-events-none"><div className="flex items-center gap-2 mb-2"><span className="px-2 py-0.5 bg-orange-500/80 rounded text-[9px] font-black tracking-widest uppercase">#{store.NO}</span></div><h4 className="text-2xl font-black truncate drop-shadow-lg tracking-tight">{store.店舗名}</h4></div></div>
+                              <div className="p-8 flex-1 flex flex-col font-bold text-sm text-slate-500 space-y-4"><div className="flex items-start gap-4"><div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div><div className="pt-0.5"><p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {getSubArea(store.都道府県, store.住所)}</p><span className="line-clamp-2 leading-relaxed">{store.住所}</span></div></div>{store.URL && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-4 p-4 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all group/link font-black"><ExternalLink size={20} className="shrink-0 transition-transform group-hover/link:translate-x-1"/><span className="truncate text-sm">詳しく見る</span></a>)}<div className="mt-8 pt-6 border-t border-slate-50 flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0"><button onClick={() => setEditingStore(store)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Edit2 size={16}/> 編集</button><button onClick={() => deleteData(store.id)} className="p-3.5 bg-slate-50 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-2xl transition-all flex-1 flex items-center justify-center gap-2 text-xs font-black"><Trash2 size={16}/> 削除</button></div></div>
                             </div>
                           ) : (
                             <div key={store.id} className="bg-white px-8 py-4 rounded-[2rem] border border-slate-200/60 shadow-sm hover:border-orange-500 hover:shadow-xl transition-all flex items-center justify-between group">
-                              <div className="flex items-center gap-8 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2"> {store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-2 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '未分類')}</span></div></div></div>
+                              <div className="flex items-center gap-6 min-w-0"><div className="w-12 h-12 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0 font-black text-sm group-hover:bg-orange-50 group-hover:rotate-12 transition-all shadow-lg">#{store.NO}</div><div className="min-w-0">{store.URL ? (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="font-black text-slate-800 hover:text-orange-600 transition-colors truncate text-xl flex items-center gap-2">{store.店舗名} <ExternalLink size={16} className="text-slate-200 group-hover:text-orange-300"/></a>) : (<h4 className="font-black text-slate-800 truncate text-xl">{store.店舗名}</h4>)}<div className="flex items-center gap-5 text-[10px] text-slate-400 font-black mt-2 uppercase tracking-[0.2em] leading-none"><span className="flex items-center gap-2"><MapPin size={12} className="text-orange-400"/> {getRegionFromPref(store.都道府県)} | {store.都道府県} • {getSubArea(store.都道府県, store.住所)}</span><span className="bg-slate-100 px-3 py-1.5 rounded-xl text-slate-500 group-hover:bg-orange-50 group-hover:text-orange-500 transition-colors">{(store.カテゴリ || '未分類')}</span></div></div></div>
                               <div className="flex items-center gap-2"><button onClick={() => toggleFavorite(store)} className={`p-3.5 rounded-2xl transition-all active:scale-150 ${store.isFavorite ? 'text-rose-500 bg-rose-50' : 'text-slate-200 hover:text-rose-300 hover:bg-slate-50'}`}><Heart size={22} fill={store.isFavorite ? "currentColor" : "none"} /></button><button onClick={() => setEditingStore(store)} className="p-3.5 text-slate-200 hover:text-indigo-500 hover:bg-slate-50 rounded-2xl transition-colors"><Edit2 size={22}/></button><button onClick={() => deleteData(store.id)} className="p-3.5 text-slate-200 hover:text-rose-500 hover:bg-slate-50 rounded-2xl transition-colors"><Trash2 size={22}/></button></div>
                             </div>
                           )
@@ -561,15 +598,29 @@ const App = () => {
 
       {(editingStore || isAddingNew) && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-md animate-in fade-in duration-300 px-4">
-          <form onSubmit={async (e) => { e.preventDefault(); const fd = new FormData(e.target); const updated = Object.fromEntries(fd.entries()); await saveData([ { ...editingStore, ...updated } ]); setEditingStore(null); setIsAddingNew(false); }} className="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] border border-white/20">
-            <div className="px-10 py-8 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-10"><h2 className="font-black text-2xl text-slate-800 tracking-tight flex items-center gap-3 italic underline decoration-orange-500 decoration-4 underline-offset-8">{editingStore ? 'RE-EDIT' : 'ADD NEW'}</h2><button type="button" onClick={() => {setEditingStore(null); setIsAddingNew(false);}} className="p-2.5 text-slate-300 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-all"><X size={32} /></button></div>
-            <div className="p-10 space-y-8 overflow-y-auto scrollbar-hide"><div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Store Name</label><input name="店舗名" defaultValue={editingStore?.店舗名} required className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white focus:border-orange-300 font-bold transition-all text-lg" placeholder="お店の名前" /></div><div className="grid grid-cols-2 gap-6"><div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Prefecture</label><input name="都道府県" defaultValue={editingStore?.都道府県} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white focus:border-orange-300 font-bold transition-all" placeholder="例: 東京都" /></div><div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Category</label><input name="カテゴリ" defaultValue={editingStore?.カテゴリ} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white focus:border-orange-300 font-bold transition-all" placeholder="例: ラーメン" /></div></div><div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Address</label><input name="住所" defaultValue={editingStore?.住所} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white focus:border-orange-300 font-bold transition-all" placeholder="住所" /></div><div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Website URL</label><input name="URL" defaultValue={editingStore?.URL} placeholder="https://..." className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white focus:border-orange-300 font-bold transition-all text-blue-600" /></div></div>
-            <div className="p-10 bg-slate-50 flex gap-4 border-t sticky bottom-0 z-10"><button type="button" onClick={() => {setEditingStore(null); setIsAddingNew(false);}} className="flex-1 py-5 font-black text-slate-500 hover:text-slate-700 transition-colors text-sm tracking-widest">CANCEL</button><button type="submit" className="flex-[2] py-5 bg-slate-900 text-white font-black rounded-[2rem] shadow-2xl hover:bg-slate-800 active:scale-95 transition-all text-sm tracking-widest flex items-center justify-center gap-3"><Save size={18}/> SAVE CHANGES</button></div>
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            const updated = Object.fromEntries(fd.entries());
+            await saveData([ { ...editingStore, ...updated } ]);
+            setEditingStore(null); setIsAddingNew(false);
+          }} className="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] border border-white/20">
+            <div className="px-10 py-8 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-10"><h2 className="font-black text-2xl text-slate-800 tracking-tight flex items-center gap-3 italic underline decoration-orange-500 decoration-4 underline-offset-8 uppercase">{editingStore ? 'Edit' : 'New'}</h2><button type="button" onClick={() => {setEditingStore(null); setIsAddingNew(false);}} className="p-2.5 text-slate-300 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-all"><X size={32} /></button></div>
+            <div className="p-10 space-y-8 overflow-y-auto scrollbar-hide">
+              <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Store Name</label><input name="店舗名" defaultValue={editingStore?.店舗名} required className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 focus:bg-white font-bold transition-all text-lg" /></div>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Prefecture</label><input name="都道府県" defaultValue={editingStore?.都道府県} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 font-bold transition-all" placeholder="例: 東京都" /></div>
+                <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Category</label><input name="カテゴリ" defaultValue={editingStore?.カテゴリ} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 font-bold transition-all" placeholder="例: ラーメン" /></div>
+              </div>
+              <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Address</label><input name="住所" defaultValue={editingStore?.住所} className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 font-bold transition-all" /></div>
+              <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">URL</label><input name="URL" defaultValue={editingStore?.URL} placeholder="https://..." className="w-full p-4.5 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-4 focus:ring-orange-500/10 font-bold transition-all text-blue-600" /></div>
+            </div>
+            <div className="p-10 bg-slate-50 flex gap-4 border-t sticky bottom-0 z-10"><button type="button" onClick={() => {setEditingStore(null); setIsAddingNew(false);}} className="flex-1 py-5 font-black text-slate-500 hover:text-slate-700 transition-colors text-sm tracking-widest uppercase">Cancel</button><button type="submit" className="flex-[2] py-5 bg-slate-900 text-white font-black rounded-[2rem] shadow-2xl hover:bg-slate-800 active:scale-95 transition-all text-sm tracking-widest flex items-center justify-center gap-3 uppercase"><Save size={18}/> Save Changes</button></div>
           </form>
         </div>
       )}
-      <button onClick={() => setIsAddingNew(true)} className="fixed bottom-10 right-8 w-20 h-20 bg-gradient-to-br from-orange-500 to-rose-500 text-white rounded-[2.2rem] shadow-2xl shadow-orange-200 flex items-center justify-center z-[60] active:scale-110 transition-all animate-in slide-in-from-bottom-10 duration-700 md:hidden hover:rotate-90"><Plus size={40} strokeWidth={3} /></button>
-      <label className="fixed bottom-36 right-10 w-14 h-14 bg-white/90 text-slate-800 border border-slate-200 rounded-2xl shadow-2xl flex items-center justify-center z-[60] active:scale-110 transition-all md:hidden backdrop-blur-lg"><Upload size={24} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
+
+      <button onClick={() => setIsAddingNew(true)} className="fixed bottom-10 right-8 w-20 h-20 bg-gradient-to-br from-orange-500 to-rose-500 text-white rounded-[2.2rem] shadow-2xl shadow-orange-200 flex items-center justify-center z-[60] active:scale-110 transition-all md:hidden"><Plus size={40} strokeWidth={3} /></button>
     </div>
   );
 };
