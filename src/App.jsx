@@ -17,7 +17,7 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
 } from 'firebase/auth';
 
-console.log("### UI-REFINE CHECK v3 (Firestore Path Fixed) ###");
+console.log("### UI-REFINE CHECK v3 (Firestore Path Fixed & Unsub Scope Fixed) ###");
 
 // --- 0. 定数定義 ---
 const PREF_ORDER = [
@@ -82,7 +82,6 @@ const getFirebaseConfig = () => {
     return JSON.parse(__firebase_config);
   }
   try {
-    // Vite環境用 (es2015ターゲットでの警告回避)
     const env = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env : {};
     if (env.VITE_FIREBASE_API_KEY) {
       return {
@@ -107,7 +106,6 @@ const getFirebaseConfig = () => {
 };
 
 const config = getFirebaseConfig();
-// MANDATORY RULE 1: アプリIDはFirestoreパスの一部として使用される
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'gourmet-master-v1';
 
 let firebaseApp = null;
@@ -166,38 +164,42 @@ const App = () => {
     return () => { if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // --- 3. 認証処理 ---
+  // --- 3. 認証処理 (Cleanup Scope Fix) ---
   useEffect(() => {
-    if (!cloudMode || !auth) {
-      setUser({ uid: 'local-user' });
-      return;
-    }
-    const unsub = onAuthStateChanged(auth, (u) => { if (u) setUser(u); });
-    const signIn = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+    let unsubAuth = null;
+    if (cloudMode && auth) {
+      unsubAuth = onAuthStateChanged(auth, (u) => { if (u) setUser(u); });
+      const signIn = async () => {
+        try {
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+        } catch (err) {
+          setCloudMode(false);
+          setAuthError(`Cloud Mode Error: ${err.code}`);
+          setUser({ uid: 'local-user' });
         }
-      } catch (err) {
-        setCloudMode(false);
-        setAuthError(`Cloud Mode Error: ${err.code}`);
-        setUser({ uid: 'local-user' });
-      }
+      };
+      signIn();
+    } else {
+      setUser({ uid: 'local-user' });
+    }
+    return () => {
+      if (typeof unsubAuth === "function") unsubAuth();
     };
-    signIn();
-    return () => unsub();
   }, [cloudMode]);
 
-  // --- 4. データ同期 (Cloud / Local) ---
+  // --- 4. データ同期 (Cleanup Scope Fix) ---
   useEffect(() => {
     if (!user) return;
+    let unsubSnapshot = null;
     if (cloudMode && db && user.uid !== 'local-user') {
       setIsSyncing(true);
       // MANDATORY RULE 1: /artifacts/{appId}/users/{userId}/{collectionName}
       const storesCol = collection(db, 'artifacts', appId, 'users', user.uid, 'stores');
-      const unsubscribe = onSnapshot(storesCol, 
+      unsubSnapshot = onSnapshot(storesCol, 
         (snapshot) => {
           setData(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
           setFsError(null);
@@ -210,10 +212,12 @@ const App = () => {
           setIsSyncing(false);
         }
       );
-      return () => unsubscribe();
     } else {
       loadLocalData();
     }
+    return () => {
+      if (typeof unsubSnapshot === "function") unsubSnapshot();
+    };
   }, [user, cloudMode]);
 
   const loadLocalData = () => {
@@ -372,7 +376,7 @@ const App = () => {
           </div>
           
           <div className="flex-1 max-w-xl relative group">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-orange-500 transition-colors" size={18} />
             <input 
               type="text" 
               placeholder="店名、住所、メモを検索..." 
@@ -551,7 +555,7 @@ const App = () => {
                               <div className="p-8 flex-1 flex flex-col">
                                 <div className="space-y-4 text-sm flex-1 font-bold">
                                   <div className="flex items-start gap-4">
-                                    <div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={18} /></div>
+                                    <div className="bg-orange-50 p-2.5 rounded-xl text-orange-500 shrink-0 mt-0.5"><MapPin size={16} /></div>
                                     <div className="pt-0.5">
                                       <p className="text-orange-600 text-[10px] font-black uppercase mb-1">{store.都道府県} • {subArea}</p>
                                       <span className="line-clamp-2 leading-relaxed text-slate-600">{store.住所}</span>
