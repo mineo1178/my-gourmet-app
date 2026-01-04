@@ -164,11 +164,20 @@ const App = () => {
     return () => { if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
-  // --- 3. 認証処理 (Cleanup Scope Fix) ---
+  // --- 3. 認証処理 (UID表示ログ追加) ---
   useEffect(() => {
     let unsubAuth = null;
     if (cloudMode && auth) {
-      unsubAuth = onAuthStateChanged(auth, (u) => { if (u) setUser(u); });
+      unsubAuth = onAuthStateChanged(auth, (u) => { 
+        if (u) {
+          // デバッグ用コンソール表示
+          const providerId = u.isAnonymous ? "anonymous" : (u.providerData[0]?.providerId || "unknown");
+          console.log("Auth UID:", u.uid);
+          console.log("Provider:", providerId);
+          
+          setUser(u); 
+        }
+      });
       const signIn = async () => {
         try {
           if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -191,7 +200,7 @@ const App = () => {
     };
   }, [cloudMode]);
 
-  // --- 4. データ同期 (Cleanup Scope Fix) ---
+  // --- 4. データ同期 ---
   useEffect(() => {
     if (!user) return;
     let unsubSnapshot = null;
@@ -387,6 +396,13 @@ const App = () => {
           </div>
 
           <div className="flex items-center gap-3">
+             {/* Auth Debug Info (右上へのデバッグ表示) */}
+             {user && (
+               <div className="hidden lg:flex flex-col text-[10px] text-slate-400 font-mono leading-none text-right mr-2 select-all cursor-help" title={`Full UID: ${user.uid}`}>
+                 <div>UID: {user.uid.slice(0, 8)}...</div>
+                 <div>IDP: {user.isAnonymous ? 'anonymous' : (user.providerData[0]?.providerId || 'firebase')}</div>
+               </div>
+             )}
              <div className={`p-2 rounded-full ${isSyncing ? 'text-orange-500 animate-spin' : 'text-slate-300'}`}>
                {cloudMode ? <Cloud size={20} /> : <Database size={20} />}
              </div>
@@ -523,7 +539,7 @@ const App = () => {
                   {groupedData.map(([category, stores]) => (
                     <div key={category} id={`category-section-${category}`} className="space-y-8 scroll-mt-44 animate-in slide-in-from-bottom-4 duration-500">
                       <div className="flex items-center gap-5 px-2">
-                        <h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 uppercase tracking-tighter"><Layers size={26} className="text-orange-500" /> {category}</h3>
+                        <h3 className="text-2xl font-black text-slate-800 flex items-center gap-3 tracking-tighter uppercase"><Layers size={26} className="text-orange-500" /> {category}</h3>
                         <div className="flex-1 h-px bg-slate-200/60"></div>
                         <span className="bg-orange-500 text-white px-5 py-1.5 rounded-full text-[10px] font-black uppercase shadow-lg shadow-orange-100">{stores.length} 件</span>
                       </div>
