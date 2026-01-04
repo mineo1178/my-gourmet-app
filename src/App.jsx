@@ -1,14 +1,14 @@
-import React, { useState, useMemo, useEffect, Component } from 'react';
+import React, { useState, useMemo, useEffect, Component, useDeferredValue } from 'react';
 import { 
   Search, MapPin, ExternalLink, Plus, 
   Upload, Trash2, Edit2, X, Store, Heart, Save, 
   Loader2, Map as MapIcon, Grid, Database, 
   ChevronRight, Layers, ArrowDown, 
   Cloud, Copy, RefreshCcw, ShieldAlert, List,
-  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash, Key, Link as LinkIcon, Settings
+  Filter, PieChart, Info, ImageIcon, Navigation, Bug, ChevronUp, ChevronDown, RotateCcw, Trash, Key, Link as LinkIcon
 } from 'lucide-react';
 
-// Firebase SDK インポート
+// Firebase SDK
 import { initializeApp, getApps } from 'firebase/app';
 import { 
   getFirestore, collection, doc, setDoc, onSnapshot, 
@@ -27,8 +27,8 @@ import {
   signOut
 } from 'firebase/auth';
 
-// ★ バージョン定義
-const VERSION = "v3.61-FINAL-FIX";
+// ★ バージョン
+const VERSION = "v3.63-FIXED";
 
 // --- A. ErrorBoundary ---
 class ErrorBoundary extends Component {
@@ -39,9 +39,9 @@ class ErrorBoundary extends Component {
       return (
         <div className="min-h-screen bg-slate-900 text-white p-8 font-mono flex flex-col items-center justify-center text-center text-xs">
           <ShieldAlert size={48} className="text-rose-500 mb-4" />
-          <h1 className="text-lg font-black uppercase tracking-tighter">Diagnostic Report</h1>
-          <p className="mt-2 text-rose-400 font-bold">{this.state.error?.message}</p>
-          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-slate-900 rounded-xl font-black uppercase shadow-2xl active:scale-95 transition-all">Reload System</button>
+          <h1 className="text-lg font-black uppercase">System Crash</h1>
+          <p className="mt-2 text-rose-400">{this.state.error?.message}</p>
+          <button onClick={() => window.location.reload()} className="mt-6 px-6 py-3 bg-white text-black rounded-xl font-bold">RELOAD</button>
         </div>
       );
     }
@@ -49,7 +49,7 @@ class ErrorBoundary extends Component {
   }
 }
 
-// --- 0. 定数定義 (修正: 不足していた定義を復活) ---
+// --- 0. 定数 ---
 const PREF_ORDER = [
   '北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県',
   '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県',
@@ -72,16 +72,16 @@ const regions = {
 };
 
 const getSubArea = (pref, address = "") => {
-  if (!address) return "主要エリア";
+  if (!address) return "エリア";
   if (pref === '東京都') {
-    if (address.match(/千代田|中央|港|新宿|文京|台東|墨田|江東|品川|目黒|大田|世田谷|渋谷|中野|杉並|豊島|北|荒川|板橋|練馬|足立|葛飾|江戸川/)) return "23区内";
-    return "都内・その他";
+    if (address.match(/千代田|中央|港|新宿|文京|台東|墨田|江東|品川|目黒|大田|世田谷|渋谷|中野|杉並|豊島|北|荒川|板橋|練馬|足立|葛飾|江戸川/)) return "23区";
+    return "都内";
   }
   const match = address.match(/^.*?[市郡区]/);
-  return match ? match[0].replace(pref, "") : "主要エリア";
+  return match ? match[0].replace(pref, "") : "主要";
 };
 
-// --- 1. Firebase 設定ハイブリッド ---
+// --- 1. Firebase ---
 const getFirebaseConfig = () => {
   try {
     if (typeof __firebase_config !== 'undefined' && __firebase_config) {
@@ -101,7 +101,7 @@ const getFirebaseConfig = () => {
         isEnvConfig: true
       };
     }
-  } catch (e) { console.error("CONFIG_ERR", e); }
+  } catch (e) { console.error(e); }
   return { firebaseConfig: null, isEnvConfig: false };
 };
 
@@ -114,13 +114,13 @@ if (isEnvConfig && firebaseConfig?.apiKey) {
     firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
-  } catch (e) { console.error("FIREBASE_INIT_CRASH", e); }
+  } catch (e) { console.error(e); }
 }
 
 const canUseCloud = Boolean(auth && db);
 const checkIsMobile = () => /iPhone|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent));
 
-// --- B. アプリケーション本体 ---
+// --- B. アプリ本体 ---
 const GourmetApp = () => {
   const [data, setData] = useState([]);
   const [user, setUser] = useState(null);
@@ -128,14 +128,18 @@ const GourmetApp = () => {
   const [authChecked, setAuthChecked] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState('map');
-  const [searchTerm, setSearchTerm] = useState('');
   const [selectedPrefecture, setSelectedPrefecture] = useState('すべて');
   const [viewMode, setViewMode] = useState('detail');
   const [libLoaded, setLibLoaded] = useState(false);
-  const [syncTrigger, setSyncTrigger] = useState(0); 
+  const [syncTrigger, setSyncTrigger] = useState(0);
 
-  // --- 同期設定（共有キー） ---
-  const [shareKey, setShareKey] = useState(() => (localStorage.getItem('gourmet_share_key') || '').trim());
+  // --- パフォーマンス改善（入力ラグ防止） ---
+  const [searchTermInput, setSearchTermInput] = useState('');
+  const searchTerm = useDeferredValue(searchTermInput);
+
+  const [shareKeyInput, setShareKeyInput] = useState(() => (localStorage.getItem('gourmet_share_key') || '').trim());
+  const [shareKey, setShareKey] = useState(shareKeyInput);
+
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [logs, setLogs] = useState([]);
 
@@ -146,19 +150,28 @@ const GourmetApp = () => {
 
   const isMobile = useMemo(() => checkIsMobile(), []);
   
-  // パスの決定（共有キー最優先）
+  // クラウド接続判定（合言葉が3文字以上で有効化）
   const firestoreCollectionPath = useMemo(() => {
     if (!user) return null;
-    if (shareKey.trim().length > 0) return `artifacts/${appId}/shared/${shareKey.trim()}/stores`;
+    const key = shareKey.trim();
+    if (key.length >= 3) return `artifacts/${appId}/shared/${key}/stores`;
     if (!user.isAnonymous) return `artifacts/${appId}/users/${user.uid}/stores`;
     return null;
   }, [shareKey, user]);
 
+  // 合言葉入力の反映（ラグ防止）
   useEffect(() => {
-    localStorage.setItem('gourmet_share_key', shareKey.trim());
-    addLog("PATH_UPDATE", firestoreCollectionPath || "Local");
+    const timer = setTimeout(() => {
+      setShareKey(shareKeyInput);
+      localStorage.setItem('gourmet_share_key', shareKeyInput.trim());
+    }, 400); 
+    return () => clearTimeout(timer);
+  }, [shareKeyInput]);
+
+  useEffect(() => {
+    addLog("PATH_SYNC", firestoreCollectionPath || "Local");
     setSyncTrigger(prev => prev + 1);
-  }, [shareKey, user, firestoreCollectionPath]);
+  }, [firestoreCollectionPath]);
 
   // 認証
   useEffect(() => {
@@ -172,9 +185,8 @@ const GourmetApp = () => {
       else {
         try {
           const res = await signInAnonymously(auth);
-          addLog("ANON_LOGIN", res.user.uid.slice(0,5));
+          addLog("ANON_OK", res.user.uid.slice(0,4));
         } catch (e) {
-          addLog("ANON_FAIL", e.code);
           setAuthChecked(true);
         }
       }
@@ -195,16 +207,14 @@ const GourmetApp = () => {
     } catch (err) { addLog("LOGIN_ERR", err.code); }
   };
 
-  // Firestore 同期
+  // 購読
   useEffect(() => {
     if (!user || !firestoreCollectionPath) { loadLocalData(); return; }
     setIsSyncing(true);
-    addLog("SUBSCRIBE", firestoreCollectionPath);
     const q = collection(db, firestoreCollectionPath);
     const unsub = onSnapshot(q, (snap) => {
       setData(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
       setIsSyncing(false);
-      addLog("SYNC_OK", snap.docs.length);
     }, (err) => { 
       setIsSyncing(false); 
       loadLocalData(); 
@@ -223,21 +233,18 @@ const GourmetApp = () => {
     if (canUseCloud && firestoreCollectionPath) {
       setIsSyncing(true);
       try {
-        const CHUNK = 400;
-        for (let i = 0; i < safeStores.length; i += CHUNK) {
-          const batch = writeBatch(db);
-          safeStores.slice(i, i + CHUNK).forEach(s => {
-            const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
-            const docRef = doc(db, firestoreCollectionPath, docId);
-            batch.set(docRef, { ...s, id: docId }, { merge: true });
-          });
-          await batch.commit();
-        }
-        addLog("CLOUD_SAVE_OK");
+        const batch = writeBatch(db);
+        safeStores.forEach(s => {
+          const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
+          const docRef = doc(db, firestoreCollectionPath, docId);
+          batch.set(docRef, { ...s, id: docId }, { merge: true });
+        });
+        await batch.commit();
+        addLog("SYNC_COMPLETE");
       } catch (e) { addLog("SAVE_ERR", e.code); }
       setIsSyncing(false);
     } else {
-      const newDataMap = new Map(data.filter(Boolean).map(item => [item.id, item]));
+      const newDataMap = new Map(data.map(item => [item.id, item]));
       safeStores.forEach(s => {
         const docId = s.id || `${s.店舗名}-${s.住所}`.replace(/[.#$/[\]]/g, "_");
         newDataMap.set(docId, { ...s, id: docId });
@@ -251,7 +258,10 @@ const GourmetApp = () => {
   const deleteData = async (id) => {
     if (!window.confirm("この店舗を削除しますか？")) return;
     if (canUseCloud && firestoreCollectionPath) {
-      try { await deleteDoc(doc(db, firestoreCollectionPath, id)); addLog("DEL_OK"); } catch(e) { addLog("DEL_ERR", e.code); }
+      try {
+        await deleteDoc(doc(db, firestoreCollectionPath, id));
+        addLog("DELETE_CLOUD_OK");
+      } catch(e) { addLog("DELETE_ERR", e.code); }
     } else {
       const filtered = data.filter(d => d.id !== id);
       setData(filtered);
@@ -269,9 +279,14 @@ const GourmetApp = () => {
     }
   };
 
+  // --- 修正: 不足していた関数を定義 ---
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (!file || !window.XLSX) return;
+    if (!file || !window.XLSX) {
+      alert("読み込み準備ができていません。再試行してください。");
+      return;
+    }
+    addLog("FILE_START", file.name);
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
@@ -289,7 +304,8 @@ const GourmetApp = () => {
         }));
         saveData(normalized);
         setActiveTab('list');
-      } catch (err) { alert("解析失敗"); }
+        addLog("FILE_SUCCESS", normalized.length);
+      } catch (err) { alert("解析に失敗しました。形式を確認してください。"); }
     };
     reader.readAsArrayBuffer(file);
   };
@@ -319,147 +335,126 @@ const GourmetApp = () => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => setLibLoaded(true);
+    script.onload = () => { setLibLoaded(true); addLog("XLSX_READY"); };
     document.head.appendChild(script);
   }, []);
 
   if (!authChecked) {
-    return <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 text-center">
-      <Loader2 className="animate-spin text-orange-500 w-12 h-12 mb-4 mx-auto" />
-      <h2 className="text-4xl font-black text-slate-800 tracking-tighter mb-2">{VERSION}</h2>
-      <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">Initializing...</p>
+    return <div className="min-h-screen flex items-center justify-center font-sans">
+      <Loader2 className="animate-spin text-orange-500 w-10 h-10" />
     </div>;
   }
 
-  // --- UI Parts ---
-  const SyncSettingsCard = () => (
-    <div className="max-w-4xl mx-auto mb-12 bg-white rounded-[3rem] p-6 sm:p-10 border border-slate-100 shadow-xl animate-in fade-in duration-700">
-      <div className="flex flex-col md:flex-row items-center gap-6 md:gap-10">
-        <div className="flex-1 space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Key size={20} /></div>
-            <h3 className="font-black text-2xl italic">同期設定 (Sync Settings)</h3>
-          </div>
-          <p className="text-sm text-slate-400 font-bold leading-relaxed">
-            WindowsとiPhoneで同じ「合言葉」を入力してください。<br className="hidden sm:block"/>
-            入力すると「Cloud」に切り替わり、データが同期されます。
-          </p>
-        </div>
-        <div className="w-full md:w-auto flex flex-col gap-4 min-w-[300px]">
-          <input 
-            type="text" 
-            value={shareKey} 
-            onChange={(e) => setShareKey(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
-            placeholder="合言葉を入力 (例: myfood)"
-            className="w-full p-5 bg-slate-50 border-2 border-slate-100 rounded-3xl outline-none focus:border-orange-500 transition-all font-black text-center text-xl shadow-inner"
-          />
-          {shareKey && (
-            <button onClick={() => { if(window.confirm("Windows側のリストをクラウド(合言葉)へ送信しますか？")) saveData(data); }} className="w-full py-4 bg-orange-600 text-white rounded-2xl font-black hover:bg-orange-700 transition-all text-xs shadow-lg flex items-center justify-center gap-2 uppercase tracking-tighter active:scale-95">
-              <Upload size={18}/> クラウドへデータを送信
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-orange-100 relative overflow-x-hidden pb-20 sm:pb-0">
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans pb-20 sm:pb-0">
       
-      {/* 診断ログ用 (Bugアイコン) */}
-      <button onClick={() => setIsDebugOpen(!isDebugOpen)} className="fixed bottom-4 right-4 z-[100] p-3 bg-slate-900 text-white rounded-full shadow-2xl opacity-40 hover:opacity-100 transition-all">
-        <Bug size={18} />
-      </button>
+      {/* 診断ログボタン */}
+      <button onClick={() => setIsDebugOpen(!isDebugOpen)} className="fixed bottom-4 right-4 z-[100] p-3 bg-slate-900 text-white rounded-full opacity-30 hover:opacity-100 transition-all"><Bug size={18} /></button>
 
       {isDebugOpen && (
-        <div className="fixed bottom-0 right-0 z-[110] w-full sm:w-96 h-[60vh] bg-slate-900 text-[9px] text-slate-300 font-mono p-4 border-t border-white/20 shadow-2xl overflow-y-auto scrollbar-hide">
-          <div className="flex justify-between items-center mb-4 border-b border-white/10 pb-2">
-            <span className="font-bold text-orange-500 uppercase tracking-widest">SYSTEM LOG</span>
-            <button onClick={() => setIsDebugOpen(false)}><X size={16}/></button>
+        <div className="fixed bottom-0 right-0 z-[110] w-full sm:w-96 h-[50vh] bg-slate-900 text-[9px] text-slate-300 font-mono p-4 border-t border-white/20 overflow-y-auto">
+          <div className="flex justify-between items-center mb-2 border-b border-white/10 pb-1">
+            <span className="text-orange-500 font-bold uppercase">SYSTEM LOG</span>
+            <button onClick={() => setIsDebugOpen(false)}><X size={14}/></button>
           </div>
-          <div className="space-y-1">
-             {logs.map((l, i) => ( <div key={i} className="flex gap-2 border-b border-white/5 pb-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-black shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
-          </div>
+          {logs.map((l, i) => ( <div key={i} className="flex gap-2 border-b border-white/5 py-1"><span className="text-slate-600 shrink-0">{l.time}</span><span className="text-orange-400 font-bold shrink-0">{l.event}</span><span className="text-slate-400 break-all">{l.value}</span></div> ))}
         </div>
       )}
 
-      <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-4 gap-4">
-        <div className="flex items-center gap-3 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
-          <div className="bg-orange-500 p-2.5 rounded-2xl text-white shadow-lg"><Store size={22} /></div>
-          <div className="hidden lg:block leading-tight">
-            <h1 className="font-black text-xl tracking-tighter text-slate-800 uppercase italic">Gourmet Master</h1>
-          </div>
+      {/* ヘッダー */}
+      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-xl border-b border-slate-200 h-16 md:h-20 flex items-center px-3 sm:px-6 gap-2 sm:gap-4">
+        <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setActiveTab('map')}>
+          <div className="bg-orange-500 p-2 rounded-xl text-white shadow-lg"><Store size={20} /></div>
+          <h1 className="font-black text-lg tracking-tighter text-slate-800 uppercase italic hidden sm:block">Gourmet Master</h1>
         </div>
         
-        <div className="flex-1 relative group max-w-xl">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-orange-500 transition-colors" size={18} />
-          <input type="text" placeholder="店名検索..." className="w-full pl-11 pr-4 py-2.5 bg-slate-100/80 border-none rounded-2xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+        <div className="flex-1 relative group">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+          <input 
+            type="text" 
+            placeholder="検索..." 
+            className="w-full pl-9 pr-3 py-2.5 bg-slate-100/80 border-none rounded-xl text-sm outline-none focus:bg-white focus:ring-4 focus:ring-orange-500/5 transition-all font-bold" 
+            value={searchTermInput} 
+            onChange={(e) => setSearchTermInput(e.target.value)} 
+          />
         </div>
         
-        <div className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border shadow-inner shrink-0 ${firestoreCollectionPath ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-200'}`}>
+        {/* 同期ステータスバッジ */}
+        <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border shrink-0 transition-all ${firestoreCollectionPath ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-200'}`}>
           <Cloud size={14} className={firestoreCollectionPath ? 'text-orange-500' : 'text-slate-400'} />
-          <span className={`text-[10px] font-black uppercase tracking-tighter ${firestoreCollectionPath ? 'text-orange-700' : 'text-slate-600'}`}>
+          <span className={`text-[10px] font-black uppercase ${firestoreCollectionPath ? 'text-orange-600' : 'text-slate-500'}`}>
             {firestoreCollectionPath ? 'Cloud' : 'Local'}
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-           <label className="p-2.5 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 cursor-pointer shadow-xl transition-all active:scale-95 hidden sm:flex">
+        <div className="hidden sm:flex items-center gap-2">
+           <label className="p-2.5 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-slate-800 active:scale-95 transition-all">
              <Upload size={20} /><input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} />
            </label>
-           {(!user || user.isAnonymous) && (
-             <button onClick={startLogin} className="p-2.5 bg-white border border-slate-200 text-slate-400 rounded-2xl hover:bg-slate-50 transition-all" title="Googleログイン"><LinkIcon size={20} /></button>
-           )}
+           <button onClick={startLogin} className="p-2.5 bg-white border border-slate-200 text-slate-400 rounded-xl hover:bg-slate-50 transition-all" title="Googleログイン"><LinkIcon size={20} /></button>
         </div>
       </header>
 
-      <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-4 shadow-sm">
+      <nav className="bg-white border-b sticky top-16 md:top-20 z-40 flex overflow-x-auto scrollbar-hide px-2">
         {[ { id: 'map', label: 'AREA', icon: <MapIcon size={16} /> }, { id: 'list', label: 'LIST', icon: <Grid size={16} /> }, { id: 'favorites', label: 'HEART', icon: <Heart size={16} /> }].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-8 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-6 py-5 text-[10px] font-black tracking-widest transition-all shrink-0 ${activeTab === tab.id ? 'text-orange-600 border-b-4 border-orange-600' : 'text-slate-400 hover:text-slate-600'}`}>
             {tab.icon} {tab.label}
           </button>
         ))}
       </nav>
 
       <main className="max-w-7xl mx-auto p-4 md:p-8 min-h-screen">
-        {/* バージョンとステータスを巨大表示 */}
-        <div className="mb-12 text-center animate-in fade-in duration-1000">
-           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] mb-2 leading-none tracking-tighter">AUTHENTICATED ENVIRONMENT</p>
+        {/* バージョン巨大表示 */}
+        <div className="mb-12 text-center">
+           <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] mb-2 leading-none">Authentication Environment</p>
            <h2 className="text-6xl sm:text-9xl font-black text-slate-900 italic tracking-tighter leading-none mb-4">{VERSION}</h2>
-           <div className="flex justify-center gap-3">
-             <div className={`px-4 py-2 rounded-full font-black text-[11px] uppercase tracking-widest ${firestoreCollectionPath ? 'bg-orange-500 text-white shadow-xl' : 'bg-slate-200 text-slate-500'}`}>
-               {firestoreCollectionPath ? 'Cloud Synchronized' : 'Local Standing'}
-             </div>
+           <div className={`inline-block px-6 py-2 rounded-full font-black text-[10px] uppercase tracking-widest ${firestoreCollectionPath ? 'bg-orange-500 text-white shadow-xl' : 'bg-slate-200 text-slate-500'}`}>
+             {firestoreCollectionPath ? 'Cloud Synchronized' : 'Local Standalone'}
            </div>
         </div>
 
-        {/* 同期設定カード (Windowsでも見える) */}
-        <SyncSettingsCard />
+        {/* 同期設定カード */}
+        <div className="max-w-4xl mx-auto mb-16 bg-white rounded-[3rem] p-8 border border-slate-100 shadow-xl">
+          <div className="flex flex-col md:flex-row items-center gap-8 text-center md:text-left">
+            <div className="flex-1 space-y-3">
+              <h3 className="font-black text-2xl flex items-center justify-center md:justify-start gap-3 italic tracking-tight"><Key className="text-orange-500" /> 同期設定 (Sync Settings)</h3>
+              <p className="text-sm text-slate-400 font-bold leading-relaxed">WindowsとiPhoneで同じ「合言葉（3文字以上）」を入力してください。リストが繋がります。</p>
+            </div>
+            <div className="w-full md:w-80 flex flex-col gap-3">
+              <input 
+                type="text" 
+                value={shareKeyInput} 
+                onChange={(e) => setShareKeyInput(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
+                placeholder="好きな言葉を入力"
+                className="w-full p-5 bg-slate-50 border-2 border-slate-100 rounded-3xl outline-none focus:border-orange-500 transition-all font-black text-center text-xl shadow-inner"
+              />
+              {shareKeyInput.trim().length >= 3 && (
+                <button onClick={() => { if(window.confirm("表示中のリストをクラウドへ送信しますか？")) saveData(data); }} className="w-full py-4 bg-orange-600 text-white rounded-2xl font-black hover:bg-orange-700 transition-all text-xs shadow-lg flex items-center justify-center gap-2 uppercase tracking-tighter">
+                  <Upload size={18}/> クラウドへデータを送信
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
 
         {data.length === 0 ? (
-          <div className="max-w-4xl mx-auto py-16 text-center">
-              <div className="bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100 animate-in zoom-in duration-500 flex flex-col items-center">
-                <Database className="text-orange-500 mb-8 opacity-20" size={100} />
-                <h2 className="text-4xl font-black mb-4 text-slate-800 tracking-tight italic uppercase leading-none">Setup Sync</h2>
-                <p className="text-slate-400 mb-10 font-bold max-w-sm mx-auto text-sm leading-relaxed">
-                  Excelからデータを取り込むか、<br/>
-                  上の入力欄に「合言葉」を入れてクラウド同期を開始してください。
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-lg">
-                  <button onClick={() => saveData([{NO:1,店舗名:"サンプル店",カテゴリ:"飲食店",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-6 bg-orange-500 text-white rounded-3xl font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest uppercase">Sample</button>
-                  <label className="py-6 border-2 border-slate-200 text-slate-600 rounded-3xl font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase">Import<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
-                </div>
+          <div className="max-w-3xl mx-auto py-20 text-center bg-white p-12 rounded-[4rem] shadow-xl border border-slate-100">
+              <Database className="mx-auto text-orange-500 mb-8 opacity-20" size={80} />
+              <h2 className="text-4xl font-black mb-4 text-slate-800 tracking-tight italic uppercase">List is Empty</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto mt-10">
+                <button onClick={() => saveData([{NO:1,店舗名:"サンプル店",カテゴリ:"飲食店",都道府県:"東京都",住所:"銀座",isFavorite:true}])} className="py-5 bg-orange-500 text-white rounded-3xl font-black shadow-xl hover:bg-orange-600 transition-all active:scale-95 text-lg italic tracking-widest">SAMPLE</button>
+                <label className="py-5 border-2 border-slate-200 text-slate-600 rounded-3xl font-black cursor-pointer hover:bg-slate-50 transition-all text-lg flex items-center justify-center gap-2 italic tracking-widest uppercase">IMPORT<input type="file" className="hidden" accept=".csv, .xlsx" onChange={handleFileUpload} /></label>
               </div>
           </div>
         ) : (
-          <div className="space-y-16 animate-in fade-in duration-700 pb-32">
+          <div className="space-y-16 pb-32">
             {activeTab === 'map' ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 animate-in fade-in duration-700">
                 {Object.keys(regions).map(reg => {
                   const count = data.filter(Boolean).filter(d => (regions[reg] || []).includes(d.都道府県)).length;
                   return (
                     <button key={reg} onClick={() => { setSelectedPrefecture('すべて'); setActiveTab('list'); }} className="group bg-white rounded-[2.5rem] p-8 text-left border border-slate-100 shadow-sm hover:shadow-2xl transition-all flex flex-col justify-between min-h-[200px] relative overflow-hidden active:scale-95">
-                      <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:opacity-10 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
+                      <div className="absolute -top-4 -right-4 p-8 opacity-5 group-hover:scale-125 transition-all rotate-12"><MapIcon size={120}/></div>
                       <div className="relative z-10"><p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] mb-1">{reg} Area</p><h3 className="text-3xl font-black text-slate-800 group-hover:text-orange-600 transition-colors uppercase tracking-tighter">{reg}</h3></div>
                       <div className="relative z-10 mt-6 flex items-center justify-between"><span className="text-sm font-black bg-slate-50 text-slate-400 px-4 py-1.5 rounded-full border border-slate-100 group-hover:bg-orange-50 group-hover:text-orange-600 transition-colors uppercase">{count} STORES</span><ChevronRight size={24} className="text-orange-500 -translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all" /></div>
                     </button>
@@ -467,10 +462,10 @@ const GourmetApp = () => {
                 })}
               </div>
             ) : (
-              <div className="flex flex-col lg:flex-row gap-10 animate-in slide-in-from-bottom-6">
-                <aside className="lg:w-80 shrink-0 hidden lg:block">
-                   <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm sticky top-44 space-y-8 max-h-[65vh] overflow-y-auto scrollbar-hide">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b border-slate-50 pb-4 italic tracking-[0.2em]"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
+              <div className="flex flex-col lg:flex-row gap-10">
+                <aside className="lg:w-72 shrink-0 hidden lg:block">
+                   <div className="bg-white p-7 rounded-[3rem] border border-slate-200 shadow-sm sticky top-44 space-y-7 max-h-[65vh] overflow-y-auto scrollbar-hide">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 border-b border-slate-50 pb-4 italic tracking-widest uppercase"><ArrowDown size={14} className="text-orange-500" /> Genre Jump</p>
                     {groupedData.map(([category, stores]) => (
                       <button key={category} onClick={() => { const el = document.getElementById(`category-section-${category}`); if(el) window.scrollTo({top: el.offsetTop - 120, behavior:'smooth'}); }} className="w-full px-5 py-4 bg-slate-50 text-left rounded-2xl text-[10px] font-black text-slate-600 hover:bg-orange-50 hover:text-orange-600 transition-all flex items-center justify-between group active:scale-95 shadow-sm border border-transparent hover:border-orange-100 uppercase tracking-widest">
                         <span className="truncate">{category}</span><span className="bg-white text-slate-900 px-2 py-0.5 rounded shadow-sm font-black text-[9px]">{stores.length}</span>
@@ -479,10 +474,10 @@ const GourmetApp = () => {
                   </div>
                 </aside>
                 <div className="flex-1 space-y-24 min-w-0 pb-32">
-                  {groupedData.length === 0 ? <div className="bg-white p-24 rounded-[4rem] text-center text-slate-300 font-black italic shadow-inner text-xl">表示できるデータがありません</div> : groupedData.map(([category, stores]) => (
-                    <div key={category} id={`category-section-${category}`} className="space-y-10 scroll-mt-44">
+                  {groupedData.map(([category, stores]) => (
+                    <div key={category} id={`category-section-${category}`} className="space-y-10 scroll-mt-44 animate-in fade-in duration-700">
                       <div className="flex items-center gap-6 px-4"><h3 className="text-3xl font-black text-slate-800 flex items-center gap-4 uppercase tracking-tighter italic"><Layers size={32} className="text-orange-500" /> {category}</h3><div className="flex-1 h-px bg-slate-200/60"></div><span className="bg-orange-500 text-white px-6 py-2 rounded-full text-[10px] font-black shadow-lg tracking-widest">{stores.length} ITEMS</span></div>
-                      <div className={viewMode === 'detail' ? "grid grid-cols-1 md:grid-cols-2 gap-10" : "space-y-4"}>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                         {stores.map(store => (
                           <div key={store.id} className="bg-white rounded-[3rem] shadow-sm border border-slate-200/50 overflow-hidden hover:shadow-2xl transition-all duration-500 flex flex-col group relative">
                             <div className="relative h-64 overflow-hidden bg-slate-100">
@@ -494,7 +489,7 @@ const GourmetApp = () => {
                             <div className="p-10 flex-1 flex flex-col justify-between gap-8 font-bold text-sm text-slate-500">
                               <p className="line-clamp-2 leading-relaxed italic">{store.住所 || "No address provided."}</p>
                               <div className="flex gap-4 pt-4 border-t border-slate-50">
-                                {store.URL && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex-1 py-4 bg-orange-50 text-orange-600 rounded-2xl hover:bg-orange-600 hover:text-white transition-all text-center text-[10px] font-black uppercase tracking-widest shadow-sm">Visit Website</a>)}
+                                {store.URL && store.URL !== 'Link' && (<a href={store.URL.startsWith('http') ? store.URL : `https://${store.URL}`} target="_blank" rel="noopener noreferrer" className="flex-1 py-4 bg-orange-50 text-orange-600 rounded-2xl hover:bg-orange-600 hover:text-white transition-all text-center text-[10px] font-black uppercase tracking-widest shadow-sm font-black">Visit Website</a>)}
                                 <button onClick={() => deleteData(store.id)} className="p-4 bg-slate-50 text-slate-400 hover:text-red-600 hover:bg-white rounded-2xl transition-all shadow-inner"><Trash2 size={20}/></button>
                               </div>
                             </div>
@@ -510,9 +505,8 @@ const GourmetApp = () => {
         )}
       </main>
 
-      <footer className="w-full py-16 text-center text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] bg-white border-t sm:hidden mb-4 leading-relaxed px-10">
-        VER {VERSION} | SHARED CLOUD SYSTEM<br/>
-        SYNCHRONIZED BY GOURMET MASTER
+      <footer className="w-full py-12 text-center text-[10px] font-black text-slate-300 uppercase tracking-[0.5em] bg-white border-t sm:hidden mb-4 leading-relaxed px-10">
+        VER {VERSION} | SHARED CLOUD SYSTEM
       </footer>
     </div>
   );
